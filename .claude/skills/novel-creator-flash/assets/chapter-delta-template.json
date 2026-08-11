@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "chapter": 1,
+  "title": "",
+  "summary": "",
+  "outline_node": "NODE-001",
+  "chapter_function": "",
+  "dominant_change": "",
+  "reader_expectation_added": "",
+  "entities": [],
+  "events": [],
+  "depends_on_events": [],
+  "knowledge_used": {},
+  "state_used": [],
+  "entity_changes": [],
+  "current_patch": {
+    "current_location": "",
+    "point_of_view": "",
+    "scene_entities": [],
+    "current_goal": "",
+    "scene_bridge": {
+      "time": "",
+      "location": "",
+      "pov": "",
+      "last_action": "",
+      "immediate_pressure": "",
+      "emotional_residue": ""
+    }
+  }
+}

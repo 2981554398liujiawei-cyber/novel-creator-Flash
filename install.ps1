@@ -11,7 +11,7 @@ if (-not $PythonCommand) { throw "Python 3.10 or newer is required and must be a
 & $PythonCommand.Source -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)"
 if ($LASTEXITCODE -ne 0) { throw 'Python 3.10 or newer is required.' }
 
-$SourceSkill = Join-Path $PSScriptRoot '.claude\skills\novel-creator-fast-production'
+$SourceSkill = Join-Path $PSScriptRoot '.claude\skills\novel-creator-flash'
 $SourceAgents = Join-Path $PSScriptRoot '.claude\agents'
 $AgentNames = @('novel-fast-writer-1.md','novel-fast-writer-2.md','novel-fast-writer-3.md','novel-fast-writer-4.md','novel-fast-writer-5.md','novel-fast-reader-flow.md','novel-fast-reader-character.md','novel-fast-reader-hook.md')
 $ObsoleteAgentNames = @('novel-style-editor.md')
@@ -29,12 +29,12 @@ else { $ClaudeRoot = Join-Path (Resolve-Path -LiteralPath $ProjectPath).Path '.c
 $SkillsRoot = Join-Path $ClaudeRoot 'skills'
 $AgentsRoot = Join-Path $ClaudeRoot 'agents'
 $BackupsRoot = Join-Path $ClaudeRoot 'backups'
-$TargetSkill = Join-Path $SkillsRoot 'novel-creator-fast-production'
+$TargetSkill = Join-Path $SkillsRoot 'novel-creator-flash'
 New-Item -ItemType Directory -Force -Path $SkillsRoot,$AgentsRoot,$BackupsRoot | Out-Null
 $Stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
 $StagingSkill = Join-Path $SkillsRoot ('.novel-fast.install-' + $Stamp + '-' + $PID)
 $StagingAgents = Join-Path $AgentsRoot ('.novel-fast-agents-install-' + $Stamp + '-' + $PID)
-$BackupRoot = Join-Path $BackupsRoot ('novel-creator-fast-production-' + $Stamp + '-' + $PID)
+$BackupRoot = Join-Path $BackupsRoot ('novel-creator-flash-' + $Stamp + '-' + $PID)
 $InstalledAgents = New-Object System.Collections.Generic.List[string]
 $MovedAgentBackups = New-Object System.Collections.Generic.List[string]
 $InstalledSkill = $false
@@ -97,7 +97,7 @@ try {
     throw
 }
 
-Write-Host "Installed novel-creator-fast-production Skill to $TargetSkill"
+Write-Host "Installed novel-creator-flash Skill to $TargetSkill"
 Write-Host "Installed 8 rapid-production subagents to $AgentsRoot"
 if ($MovedSkillBackup -or $MovedAgentBackups.Count -gt 0) { Write-Host "Previous files backup: $BackupRoot" }
 Write-Host 'Restart Claude Code so the project or user subagents are loaded.'

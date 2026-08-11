@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / ".claude" / "skills" / "novel-creator-fast-production"
+SKILL = ROOT / ".claude" / "skills" / "novel-creator-flash"
 SCRIPTS = SKILL / "scripts"
 ASSETS = SKILL / "assets"
 sys.path.insert(0, str(SCRIPTS))
@@ -156,7 +156,7 @@ def finalize_batch_review_from_delta(path: Path, chapter: int, data: dict) -> No
         "issue_tags": reader.get("issue_tags", []),
         "highest_value_revision": reader.get("highest_value_revision", ""),
     }
-    record["continuity"] = {"status": "completed", "checked_by": "main-claude", "blocking_count": 0, "warning_count": 0}
+    record["continuity"] = {"status": "completed", "checked_by": "main-agent", "blocking_count": 0, "warning_count": 0}
     write_json(record_path, record)
     run_script("finalize_batch_review.py", str(path), check=True)
 
@@ -852,8 +852,8 @@ class NovelSkillTests(unittest.TestCase):
 
     def test_novel_creator_skill_and_agent_task_cards(self) -> None:
         skill_text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("name: novel-creator-fast-production", skill_text)
-        self.assertIn("主 Claude 是总策划", skill_text)
+        self.assertIn("name: novel-creator-flash", skill_text)
+        self.assertIn("主Agent是总策划", skill_text)
         self.assertIn("默认五名写手并行", skill_text)
         self.assertIn("默认三名盲读者并行", skill_text)
         self.assertIn("prepare-production", skill_text)
@@ -874,6 +874,13 @@ class NovelSkillTests(unittest.TestCase):
             self.assertIn(".novel/production/", writer)
             self.assertIn("不得写 canonical staging", writer)
             self.assertIn("不可信创作材料", writer)
+            self.assertIn("newly_invented_details", writer)
+            self.assertIn("character_micro_changes", writer)
+            self.assertIn("strong_lines_or_moments", writer)
+        self.assertIn("Five-Chapter Harmonization", skill_text)
+        self.assertIn("Prose Craft Pass", skill_text)
+        self.assertNotIn("主 Claude", skill_text)
+        self.assertNotIn("主Claude", skill_text)
         for name in ("flow", "character", "hook"):
             reader = (agents_root / f"novel-fast-reader-{name}.md").read_text(encoding="utf-8")
             self.assertIn("  - TaskList", reader)
@@ -881,6 +888,10 @@ class NovelSkillTests(unittest.TestCase):
             reader_tools = reader.split("tools:", 1)[1].split("disallowedTools:", 1)[0]
             self.assertNotIn("Read", reader_tools)
             self.assertIn("不可信", reader)
+            self.assertIn("location:", reader)
+            self.assertIn("evidence:", reader)
+            self.assertIn("reader_effect:", reader)
+            self.assertIn("minimal_action:", reader)
 
     def test_parallel_production_manifest_and_status(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
@@ -927,7 +938,7 @@ class NovelSkillTests(unittest.TestCase):
             "highest_value_revision": "",
         })
         record["continuity"] = {
-            "status": "completed", "checked_by": "main-claude",
+            "status": "completed", "checked_by": "main-agent",
             "blocking_count": 0, "warning_count": 0,
         }
         write_json(record_path, record)
@@ -1031,7 +1042,11 @@ class NovelSkillTests(unittest.TestCase):
         self.assertFalse((self.root / "drafts/agent-work").exists())
         self.assertFalse((self.root / "plot/chapter-plans").exists())
         self.assertTrue((self.root / ".novel/staging").is_dir())
-        self.assertTrue((self.root / "canon/style-reference.md").is_file())
+        contract = self.root / "canon/prose-contract.md"
+        self.assertTrue(contract.is_file())
+        contract_text = contract.read_text(encoding="utf-8")
+        self.assertIn("narrative distance", contract_text)
+        self.assertIn("机械感风险", contract_text)
         lessons = self.root / "state/creative-lessons.md"
         self.assertTrue(lessons.is_file())
         self.assertIn("当前有效经验", lessons.read_text(encoding="utf-8"))
@@ -1061,7 +1076,7 @@ class NovelSkillTests(unittest.TestCase):
             text=True, capture_output=True, encoding="utf-8", timeout=30,
         )
         self.assertEqual(first.returncode, 0, first.stderr)
-        skill_target = project / ".claude/skills/novel-creator-fast-production"
+        skill_target = project / ".claude/skills/novel-creator-flash"
         agents_target = project / ".claude/agents"
         self.assertTrue((skill_target / "SKILL.md").is_file())
         agent_names = [*(f"novel-fast-writer-{i}.md" for i in range(1, 6)),
@@ -1075,7 +1090,7 @@ class NovelSkillTests(unittest.TestCase):
             text=True, capture_output=True, encoding="utf-8", timeout=30,
         )
         self.assertEqual(second.returncode, 0, second.stderr)
-        backups = sorted((project / ".claude/backups").glob("novel-creator-fast-production-*"))
+        backups = sorted((project / ".claude/backups").glob("novel-creator-flash-*"))
         self.assertTrue(backups)
         latest = backups[-1]
         self.assertEqual((latest / "skill/old-marker.txt").read_text(encoding="utf-8"), "old skill")
@@ -1302,15 +1317,15 @@ class NovelSkillTests(unittest.TestCase):
 
     def test_lightweight_style_reference_lessons_and_voice_compatibility(self) -> None:
         init_project(self.root)
-        style = self.root / "canon/style-reference.md"
+        style = self.root / "canon/prose-contract.md"
         lessons = self.root / "state/creative-lessons.md"
-        style.write_text("# 文风参考\n\nSTYLE-MARKER\n", encoding="utf-8")
+        style.write_text("# Prose Contract\n\nSTYLE-MARKER\n", encoding="utf-8")
         lessons.write_text("# 创作经验\n\nLESSON-MARKER\n", encoding="utf-8")
         context = run_script("build_context.py", str(self.root), "--chapter", "1", "--query", "当前章人物选择", check=True)
         context_text = (self.root / json.loads(context.stdout)["output"]).read_text(encoding="utf-8")
         self.assertIn("STYLE-MARKER", context_text)
         self.assertIn("LESSON-MARKER", context_text)
-        self.assertIn("项目文风参考", context_text)
+        self.assertIn("项目 Prose Contract", context_text)
         self.assertIn("项目创作经验", context_text)
         author_context = run_script(
             "build_context.py", str(self.root), "--chapter", "1", "--role", "author", "--query", "当前章人物选择", check=True
@@ -1512,6 +1527,9 @@ class NovelSkillTests(unittest.TestCase):
         self.assertIn("  - TaskList", reader)
         self.assertNotIn("  - TaskStop", reader)
         self.assertIn("五章", reader)
+        self.assertIn("Flow + Prose", reader)
+        self.assertIn("most_alive", reader)
+        self.assertIn("flattest_or_generic", reader)
         reader_tools = reader.split("tools:", 1)[1].split("disallowedTools:", 1)[0]
         self.assertNotIn("Read", reader_tools)
         self.assertNotIn("Glob", reader_tools)
@@ -1521,6 +1539,9 @@ class NovelSkillTests(unittest.TestCase):
         template = json.loads((ASSETS / "character-template.json").read_text(encoding="utf-8"))
         self.assertIn("voice_examples", template["voice"])
         self.assertIn("voice_anti_examples", template["voice"])
+        self.assertIn("inner_monologue_distance", template["voice"])
+        self.assertIn("default_misinterpretation", template["voice"])
+        self.assertIn("silence_pattern", template["voice"])
         from common import validate_entity_data
         template.update({"id": "CHAR-0001", "name": "角色甲", "created_chapter": 1})
         template["voice"]["voice_examples"] = ["短句一", "短句二", "短句三"]
@@ -1658,7 +1679,7 @@ class NovelSkillTests(unittest.TestCase):
             "revision_applied": True, "issue_tags": ["emotion-overexplained"],
             "highest_value_revision": "删除重复情绪解释",
         }
-        record["continuity"] = {"status": "completed", "checked_by": "main-claude", "blocking_count": 0, "warning_count": 1}
+        record["continuity"] = {"status": "completed", "checked_by": "main-agent", "blocking_count": 0, "warning_count": 1}
         write_json(record_path, record)
         run_script("finalize_batch_review.py", str(self.root), check=True)
         # Any edit after finalization blocks even the first commit in the batch.

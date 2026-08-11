@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "QUEST-0001",
+  "name": "",
+  "initial_status": "open",
+  "status": "open",
+  "owner": "",
+  "prerequisites": [],
+  "current_stage": "",
+  "failure_consequence": "",
+  "opened_chapter": 0,
+  "closed_chapter": null,
+  "notes": "",
+  "created_chapter": 0
+}

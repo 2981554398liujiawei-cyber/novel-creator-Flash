@@ -13,7 +13,7 @@ while [[ $# -gt 0 ]]; do
 done
 python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else "Python 3.10+ is required")'
 package_root="$(cd "$(dirname "$0")" && pwd)"
-source_skill="$package_root/.claude/skills/novel-creator-fast-production"
+source_skill="$package_root/.claude/skills/novel-creator-flash"
 source_agents="$package_root/.claude/agents"
 agent_names=(
   novel-fast-writer-1.md novel-fast-writer-2.md novel-fast-writer-3.md novel-fast-writer-4.md novel-fast-writer-5.md
@@ -27,10 +27,10 @@ if [[ "$scope" == "global" ]]; then claude_root="${HOME}/.claude";
 elif [[ "$scope" == "project" ]]; then [[ -n "$project_path" ]] || project_path="$(pwd)"; claude_root="$(cd "$project_path" && pwd)/.claude";
 else echo "scope must be project or global" >&2; exit 2; fi
 skills_root="$claude_root/skills"; agents_root="$claude_root/agents"; mkdir -p "$skills_root" "$agents_root" "$claude_root/backups"
-target_skill="$skills_root/novel-creator-fast-production"
+target_skill="$skills_root/novel-creator-flash"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"; token="$stamp-$$"
 staging_skill="$skills_root/.novel-fast.install-$token"; staging_agents="$agents_root/.novel-fast-agents-install-$token"
-backup_root="$claude_root/backups/novel-creator-fast-production-$token"
+backup_root="$claude_root/backups/novel-creator-flash-$token"
 installed_skill="false"; installed_agents=(); moved_skill_backup="false"; moved_agent_backups=()
 cleanup_staging(){ rm -rf "$staging_skill" "$staging_agents" 2>/dev/null || true; }
 rollback(){ set +e; [[ "$installed_skill" == true ]] && rm -rf "$target_skill"; for n in "${installed_agents[@]}"; do rm -f "$agents_root/$n"; done; if [[ "$moved_skill_backup" == true && -d "$backup_root/skill" && ! -e "$target_skill" ]]; then mv "$backup_root/skill" "$target_skill"; fi; for n in "${moved_agent_backups[@]}"; do [[ -f "$backup_root/agents/$n" && ! -e "$agents_root/$n" ]] && mv "$backup_root/agents/$n" "$agents_root/$n"; done; cleanup_staging; }
@@ -50,7 +50,7 @@ for n in "${agent_names[@]}" "${obsolete_agent_names[@]}"; do if [[ -e "$agents_
 mv "$staging_skill" "$target_skill"; installed_skill=true
 for n in "${agent_names[@]}"; do mv "$staging_agents/$n" "$agents_root/$n"; installed_agents+=("$n"); done
 rmdir "$staging_agents"; trap - ERR; trap - EXIT
-printf 'Installed novel-creator-fast-production Skill to %s\n' "$target_skill"
+printf 'Installed novel-creator-flash Skill to %s\n' "$target_skill"
 printf 'Installed %s rapid-production subagents to %s\n' "${#agent_names[@]}" "$agents_root"
 if [[ "$moved_skill_backup" == true || ${#moved_agent_backups[@]} -gt 0 ]]; then printf 'Previous files backup: %s\n' "$backup_root"; fi
 printf 'Restart Claude Code so the project or user subagents are loaded.\n'

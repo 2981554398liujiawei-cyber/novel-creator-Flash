@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "canonical_names": {},
+  "forbidden_terms": [],
+  "notes": "只记录需要统一或禁用的名称；普通角色名不必全部列入。"
+}

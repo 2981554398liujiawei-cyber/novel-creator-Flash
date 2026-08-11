@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "ITEM-0001",
+  "name": "",
+  "initial_status": "available",
+  "initial_owner": "",
+  "status": "available",
+  "owner": "",
+  "abilities": [],
+  "limits": [],
+  "source_chapter": 0,
+  "last_changed_chapter": 0,
+  "notes": "",
+  "created_chapter": 0
+}
