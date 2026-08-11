@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "latest_chapter": 0,
+  "current_arc": "ARC-001",
+  "outline_node": "NODE-001",
+  "current_goal": "",
+  "current_location": "",
+  "point_of_view": "",
+  "scene_entities": [],
+  "arc_entities": [],
+  "scene_bridge": {
+    "time": "",
+    "location": "",
+    "pov": "",
+    "last_action": "",
+    "immediate_pressure": "",
+    "emotional_residue": ""
+  },
+  "relevant_arcs": [],
+  "open_promises": [],
+  "recent_summary": "尚未开始正文。",
+  "last_commit": null,
+  "reader_review": {
+    "reviewed_through_chapter": 0,
+    "reason": "",
+    "verdict": "",
+    "ending_pull": "",
+    "revision_applied": null,
+    "issue_tags": [],
+    "highest_value_revision": ""
+  },
+  "batch": {
+    "batch_id": 1,
+    "start_chapter": 1,
+    "end_chapter": 5,
+    "batch_size": 5,
+    "next_review_chapter": 5
+  }
+}

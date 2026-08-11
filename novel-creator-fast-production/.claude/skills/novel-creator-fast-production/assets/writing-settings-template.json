@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "chapter_length": {
+    "minimum_effective_chars": 2700,
+    "target_effective_chars": 3200,
+    "soft_maximum_effective_chars": 4200
+  },
+  "batch": {
+    "batch_size": 5,
+    "planning_window": 10
+  },
+  "production": {
+    "writer_pool_size": 5,
+    "blind_reader_count": 3
+  }
+}
