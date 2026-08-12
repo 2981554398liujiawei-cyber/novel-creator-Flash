@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from batch_state import batch_review_relative
+from batch_state import review_record_relative, validate_review_unit
 from common import load_json, read_text, safe_workspace_path, sha256_text
 from production_state import READER_AGENTS
 
@@ -16,12 +16,17 @@ def chapter_key(number: int) -> str:
     return f"chapter-{number:04d}"
 
 
-def validate_batch_review_record(data: Any, batch: dict[str, int], *, require_finalized: bool = False) -> list[str]:
+def validate_batch_review_record(data: Any, batch: dict[str, Any], *, require_finalized: bool = False) -> list[str]:
     if not isinstance(data, dict):
         return ["batch review record must be an object"]
     errors: list[str] = []
     if data.get("schema") != 1 or isinstance(data.get("schema"), bool):
         errors.append("batch review schema must be integer 1")
+    unit_errors = validate_review_unit(batch, field="review unit")
+    errors.extend(unit_errors)
+    expected_kind = batch.get("review_kind", "batch")
+    if data.get("review_kind", "batch") != expected_kind:
+        errors.append(f"batch review review_kind must equal {expected_kind}")
     expected = {
         "batch_id": batch["batch_id"],
         "start_chapter": batch["start_chapter"],
@@ -43,6 +48,16 @@ def validate_batch_review_record(data: Any, batch: dict[str, int], *, require_fi
         for key, digest in value.items():
             if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
                 errors.append(f"batch review {field}.{key} must be a SHA-256 hex string")
+    blind_packet = data.get("blind_packet")
+    if not isinstance(blind_packet, dict):
+        errors.append("batch review blind_packet must be an object")
+    else:
+        packet_path = blind_packet.get("path")
+        packet_hash = blind_packet.get("sha256")
+        if not isinstance(packet_path, str) or not packet_path.startswith(".novel/blind-packets/") or not packet_path.endswith(".md"):
+            errors.append("batch review blind_packet.path must be under .novel/blind-packets")
+        if not isinstance(packet_hash, str) or SHA256_RE.fullmatch(packet_hash) is None:
+            errors.append("batch review blind_packet.sha256 must be a SHA-256 hex string")
     first_reader = data.get("first_reader")
     if not isinstance(first_reader, dict):
         errors.append("batch review first_reader must be an object")
@@ -50,8 +65,8 @@ def validate_batch_review_record(data: Any, batch: dict[str, int], *, require_fi
         if first_reader.get("status") not in {"pending", "completed"}:
             errors.append("batch review first_reader.status must be pending or completed")
         required_count = first_reader.get("required_count")
-        if not isinstance(required_count, int) or isinstance(required_count, bool) or required_count < 2 or required_count > 3:
-            errors.append("batch review first_reader.required_count must be an integer between 2 and 3")
+        if not isinstance(required_count, int) or isinstance(required_count, bool) or required_count < 1 or required_count > 3:
+            errors.append("batch review first_reader.required_count must be an integer between 1 and 3")
         available_readers = first_reader.get("available_readers", [])
         if not isinstance(available_readers, list) or any(item not in READER_AGENTS for item in available_readers):
             errors.append("batch review first_reader.available_readers contains an unknown reader agent")
@@ -85,6 +100,16 @@ def validate_batch_review_record(data: Any, batch: dict[str, int], *, require_fi
     if not isinstance(continuity, dict):
         errors.append("batch review continuity must be an object")
     else:
+        risk_level = continuity.get("risk_level", "low")
+        if risk_level not in {"low", "high"}:
+            errors.append("batch review continuity.risk_level must be low or high")
+        risk_reasons = continuity.get("risk_reasons", [])
+        if not isinstance(risk_reasons, list) or len(risk_reasons) > 8 or any(
+            not isinstance(item, str) or not item.strip() or len(item.strip()) > 160 for item in risk_reasons
+        ):
+            errors.append("batch review continuity.risk_reasons must contain at most 8 non-empty strings of at most 160 characters")
+        if risk_level == "high" and not risk_reasons:
+            errors.append("high-risk continuity review requires at least one risk reason")
         if continuity.get("status") not in {"pending", "completed"}:
             errors.append("batch review continuity.status must be pending or completed")
         if continuity.get("status") == "completed":
@@ -94,8 +119,12 @@ def validate_batch_review_record(data: Any, batch: dict[str, int], *, require_fi
                 errors.append("batch review continuity.blocking_count must be a non-negative integer")
             if not isinstance(warning_count, int) or isinstance(warning_count, bool) or warning_count < 0:
                 errors.append("batch review continuity.warning_count must be a non-negative integer")
-            if continuity.get("checked_by") != "main-agent":
-                errors.append("batch review continuity.checked_by must be main-agent")
+            checked_by = continuity.get("checked_by")
+            if risk_level == "high":
+                if checked_by != "novel-fast-continuity-reviewer":
+                    errors.append("high-risk batch continuity must be checked by novel-fast-continuity-reviewer")
+            elif checked_by not in {"main-agent", "novel-fast-continuity-reviewer"}:
+                errors.append("low-risk batch continuity.checked_by must be main-agent or novel-fast-continuity-reviewer")
     finalized = data.get("finalized")
     if not isinstance(finalized, bool):
         errors.append("batch review finalized must be boolean")
@@ -106,14 +135,14 @@ def validate_batch_review_record(data: Any, batch: dict[str, int], *, require_fi
             errors.append("blind reader panel must be completed before committing the batch")
         if isinstance(continuity, dict):
             if continuity.get("status") != "completed":
-                errors.append("main Claude continuity check must be completed before committing the batch")
+                errors.append("主Agent/轻量连续性 Reviewer 的连续性检查必须在提交前完成")
             if continuity.get("blocking_count") != 0:
-                errors.append("main Claude continuity check must have zero blocking issues before committing the batch")
+                errors.append("连续性检查在提交前必须没有 blocking 问题")
     return errors
 
 
-def load_review_record(root: Path, batch: dict[str, int]) -> tuple[Path, dict[str, Any] | None]:
-    path = safe_workspace_path(root, batch_review_relative(batch), allow_missing=True)
+def load_review_record(root: Path, batch: dict[str, Any]) -> tuple[Path, dict[str, Any] | None]:
+    path = safe_workspace_path(root, review_record_relative(batch), allow_missing=True)
     data = load_json(path, default=None)
     return path, data if isinstance(data, dict) else data
 
@@ -127,7 +156,7 @@ def current_prose_hash(root: Path, chapter: int) -> str:
     return sha256_text(read_text(path, required=True).rstrip() + "\n")
 
 
-def verify_final_hashes(root: Path, data: dict[str, Any], batch: dict[str, int]) -> list[str]:
+def verify_final_hashes(root: Path, data: dict[str, Any], batch: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     final_hashes = data.get("final_hashes", {})
     if not isinstance(final_hashes, dict):

@@ -11,6 +11,6 @@
   },
   "production": {
     "writer_pool_size": 5,
-    "blind_reader_count": 3
+    "blind_reader_count": 1
   }
 }

@@ -26,10 +26,10 @@ def main() -> int:
     parser.add_argument("--chapter-min-chars", type=int, default=2700)
     parser.add_argument("--chapter-target-chars", type=int, default=3200)
     parser.add_argument("--chapter-soft-max-chars", type=int, default=4200)
-    parser.add_argument("--batch-size", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=5, help="Compatibility option; Novel Creator review batches are permanently fixed at 5")
     parser.add_argument("--planning-window", type=int, default=10)
     parser.add_argument("--writer-pool-size", type=int, default=5)
-    parser.add_argument("--blind-reader-count", type=int, default=3)
+    parser.add_argument("--blind-reader-count", type=int, default=1)
     args = parser.parse_args()
 
     if args.chapter_min_chars < 1:
@@ -38,14 +38,14 @@ def main() -> int:
         parser.error("--chapter-target-chars must be at least --chapter-min-chars")
     if args.chapter_soft_max_chars < args.chapter_target_chars:
         parser.error("--chapter-soft-max-chars must be at least --chapter-target-chars")
-    if args.batch_size < 1:
-        parser.error("--batch-size must be positive")
-    if args.planning_window < args.batch_size:
-        parser.error("--planning-window must be at least --batch-size")
-    if not 2 <= args.writer_pool_size <= 5:
-        parser.error("--writer-pool-size must be between 2 and 5")
-    if not 2 <= args.blind_reader_count <= 3:
-        parser.error("--blind-reader-count must be between 2 and 3")
+    if args.batch_size != 5:
+        parser.error("--batch-size is fixed at 5; final 1-4 chapter tails are written by 主Agent and are not configurable batches")
+    if args.planning_window < 5:
+        parser.error("--planning-window must be at least 5")
+    if not 1 <= args.writer_pool_size <= 10:
+        parser.error("--writer-pool-size must be between 1 and 10")
+    if not 1 <= args.blind_reader_count <= 3:
+        parser.error("--blind-reader-count must be between 1 and 3")
 
     root = Path(args.workspace).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -130,7 +130,7 @@ def main() -> int:
             "soft_maximum_effective_chars": args.chapter_soft_max_chars,
         }
         settings_template["batch"] = {
-            "batch_size": args.batch_size,
+            "batch_size": 5,
             "planning_window": args.planning_window,
         }
         settings_template["production"] = {
@@ -146,9 +146,9 @@ def main() -> int:
         current_state["batch"] = {
             "batch_id": 1,
             "start_chapter": 1,
-            "end_chapter": args.batch_size,
-            "batch_size": args.batch_size,
-            "next_review_chapter": args.batch_size,
+            "end_chapter": 5,
+            "batch_size": 5,
+            "next_review_chapter": 5,
         }
         atomic_write_json(current_path, current_state)
         events = root / "state/events/events.jsonl"
@@ -175,7 +175,7 @@ def main() -> int:
     print(json.dumps({
         "ready": True,
         "workspace": str(root),
-        "next": "规划十章后运行 prepare-production，按返回路径并行调用写手池，再由主Agent 顺序整合 canonical staging。",
+        "next": "根据任务量和写手池运行 prepare-production；主Agent先规划 writer_count × 5 章骨架，再并行派发每席连续五章任务卡。",
     }, ensure_ascii=False))
     return 0
 
