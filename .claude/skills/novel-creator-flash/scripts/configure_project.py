@@ -37,7 +37,7 @@ def main() -> int:
     try:
         validate_workspace_layout(root)
         lengths = load_length_settings(root)
-        future_batch = load_batch_settings(root)
+        future_batch = load_batch_settings(root, allow_legacy_batch_size=True)
         production = load_production_settings(root)
         if args.min_chars is not None:
             lengths["minimum_effective_chars"] = _positive(args.min_chars, "--min-chars")
@@ -50,20 +50,21 @@ def main() -> int:
         if lengths["soft_maximum_effective_chars"] < lengths["target_effective_chars"]:
             raise ValueError("soft maximum chars must be at least target chars")
 
-        if args.batch_size is not None:
-            future_batch["batch_size"] = _positive(args.batch_size, "--batch-size")
+        if args.batch_size is not None and args.batch_size != 5:
+            raise ValueError("--batch-size is permanently fixed at 5; final 1-4 chapter tails are handled separately by 主Agent")
+        future_batch["batch_size"] = 5
         if args.planning_window is not None:
             future_batch["planning_window"] = _positive(args.planning_window, "--planning-window")
-        if future_batch["planning_window"] < future_batch["batch_size"]:
-            raise ValueError("planning window must be at least batch size")
+        if future_batch["planning_window"] < 5:
+            raise ValueError("planning window must be at least 5")
         if args.writer_pool_size is not None:
             production["writer_pool_size"] = _positive(args.writer_pool_size, "--writer-pool-size")
         if args.blind_reader_count is not None:
             production["blind_reader_count"] = _positive(args.blind_reader_count, "--blind-reader-count")
-        if not 2 <= production["writer_pool_size"] <= 5:
-            raise ValueError("writer pool size must be between 2 and 5")
-        if not 2 <= production["blind_reader_count"] <= 3:
-            raise ValueError("blind reader count must be between 2 and 3")
+        if not 1 <= production["writer_pool_size"] <= 10:
+            raise ValueError("writer pool size must be between 1 and 10")
+        if not 1 <= production["blind_reader_count"] <= 3:
+            raise ValueError("blind reader count per five-chapter block must be between 1 and 3")
 
         current_path = safe_workspace_path(root, "state/current.json", allow_missing=False)
         current = load_json(current_path, required=True)
@@ -78,10 +79,10 @@ def main() -> int:
         else:
             # An older project has no active batch state. Use the new configured size
             # when anchoring at its next uncommitted chapter.
-            active = make_batch(batch_id=1, start_chapter=latest + 1, batch_size=future_batch["batch_size"])
+            active = make_batch(batch_id=1, start_chapter=latest + 1, batch_size=5)
 
         review_path = safe_workspace_path(root, batch_review_relative(active), allow_missing=True)
-        batch_has_started = latest >= active["start_chapter"] or review_path.exists()
+        batch_has_started = latest >= active["start_chapter"] or review_path.exists() or isinstance(current.get("final_tail"), dict)
         if args.batch_start is not None:
             if args.batch_start != latest + 1:
                 raise ValueError(f"--batch-start must equal the next uncommitted chapter {latest + 1}")
@@ -92,13 +93,13 @@ def main() -> int:
             active = make_batch(
                 batch_id=active["batch_id"],
                 start_chapter=args.batch_start,
-                batch_size=future_batch["batch_size"],
+                batch_size=5,
             )
         elif args.batch_size is not None and not batch_has_started:
             active = make_batch(
                 batch_id=active["batch_id"],
                 start_chapter=active["start_chapter"],
-                batch_size=future_batch["batch_size"],
+                batch_size=5,
             )
 
         next_current = dict(current)
@@ -121,7 +122,7 @@ def main() -> int:
         "future_batch_defaults": future_batch,
         "active_batch": active,
         "production": production,
-        "note": "A started or frozen batch keeps its anchor; changed batch_size applies when the next batch opens.",
+        "note": "Review batches are permanently fixed at 5. A final 1-4 chapter tail is an explicit main-agent-only exception, not a configurable batch size.",
     }, ensure_ascii=False))
     return 0
 

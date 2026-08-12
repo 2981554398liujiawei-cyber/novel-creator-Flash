@@ -10,7 +10,7 @@ from typing import Any
 
 from chapter_stats import analyze_chapter_text, load_batch_settings, resolve_length_settings
 from batch_review import load_review_record, validate_batch_review_record, verify_final_hashes
-from batch_state import advance_batch, chapter_in_batch, is_batch_end, load_active_batch
+from batch_state import (advance_batch, chapter_in_review_unit, is_review_unit_end, load_active_batch, load_active_review_unit, make_next_batch_after_chapter)
 
 from common import (
     ARC_ID_RE,
@@ -404,32 +404,33 @@ def main() -> int:
         try:
             batch_settings = load_batch_settings(root)
             active_batch = load_active_batch(root, current)
+            review_unit = load_active_review_unit(root, current)
         except ValueError as exc:
             parser.error(str(exc))
-        if not chapter_in_batch(chapter, active_batch):
+        if not chapter_in_review_unit(chapter, review_unit):
             parser.error(
-                f"chapter {chapter} is outside active batch "
-                f"{active_batch['start_chapter']}-{active_batch['end_chapter']}"
+                f"chapter {chapter} is outside active review unit "
+                f"{review_unit['start_chapter']}-{review_unit['end_chapter']}"
             )
-        review_path, review_record = load_review_record(root, active_batch)
+        review_path, review_record = load_review_record(root, review_unit)
         if not isinstance(review_record, dict):
             parser.error(
-                "every chapter in the active batch requires a finalized double-review record before commit; "
+                "every chapter in the active review unit requires a finalized review record before commit; "
                 f"run prepare-review and finalize-review: {review_path.relative_to(root).as_posix()}"
             )
-        review_errors = validate_batch_review_record(review_record, active_batch, require_finalized=True)
-        review_errors.extend(verify_final_hashes(root, review_record, active_batch))
+        review_errors = validate_batch_review_record(review_record, review_unit, require_finalized=True)
+        review_errors.extend(verify_final_hashes(root, review_record, review_unit))
         if review_errors:
-            parser.error("batch review record is not ready: " + "; ".join(review_errors))
-        if is_batch_end(chapter, active_batch):
+            parser.error("review record is not ready: " + "; ".join(review_errors))
+        if is_review_unit_end(chapter, review_unit):
             reader_errors = validate_reader_review(
                 delta.get("current_patch", {}).get("reader_review"),
                 field="current_patch.reader_review",
                 expected_chapter=chapter,
-                expected_batch=active_batch,
+                expected_batch=review_unit,
             )
             if reader_errors:
-                parser.error("batch-end chapter requires a complete First Reader conclusion: " + "; ".join(reader_errors))
+                parser.error("review-unit end chapter requires a complete First Reader conclusion: " + "; ".join(reader_errors))
             reader_review = delta.get("current_patch", {}).get("reader_review", {})
             first_reader = review_record.get("first_reader", {})
             for key in ("verdict", "ending_pull", "revision_applied", "issue_tags", "highest_value_revision"):
@@ -637,8 +638,12 @@ def main() -> int:
             "recent_summary": delta.get("summary"),
             "last_commit": {"chapter": chapter, "at": utc_timestamp()},
         })
-        if is_batch_end(chapter, active_batch):
-            next_current["batch"] = advance_batch(active_batch, next_batch_size=batch_settings["batch_size"])
+        if is_review_unit_end(chapter, review_unit):
+            if review_unit.get("review_kind") == "final_tail":
+                next_current["batch"] = make_next_batch_after_chapter(active_batch, chapter)
+                next_current.pop("final_tail", None)
+            else:
+                next_current["batch"] = advance_batch(active_batch, next_batch_size=batch_settings["batch_size"])
         else:
             next_current["batch"] = active_batch
         for field in ("scene_entities", "arc_entities", "active_entities"):
@@ -687,9 +692,10 @@ def main() -> int:
             "dominant_change": delta.get("dominant_change", ""),
             "reader_expectation_added": delta.get("reader_expectation_added", ""),
             "reader_review": current_patch.get("reader_review") if isinstance(current_patch, dict) else None,
-            "batch_id": active_batch["batch_id"],
-            "batch_start_chapter": active_batch["start_chapter"],
-            "batch_end_chapter": active_batch["end_chapter"],
+            "batch_id": review_unit["batch_id"],
+            "batch_start_chapter": review_unit["start_chapter"],
+            "batch_end_chapter": review_unit["end_chapter"],
+            "review_kind": review_unit.get("review_kind", "batch"),
             "batch_review_record": review_path.relative_to(root).as_posix(),
             "entities": sorted(entity_ids),
             "events": [row["id"] for row in events],

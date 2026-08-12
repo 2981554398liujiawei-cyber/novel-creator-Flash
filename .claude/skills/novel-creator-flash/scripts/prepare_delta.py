@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from batch_state import is_batch_end, load_active_batch
+from batch_state import is_review_unit_end, load_active_review_unit
 
 from common import (
     atomic_write_json,
@@ -97,7 +97,7 @@ def main() -> int:
         parser.error(f"delta already contains work; use --force only after reviewing it: {delta_path.relative_to(root).as_posix()}")
 
     try:
-        active_batch = load_active_batch(root, current)
+        active_batch = load_active_review_unit(root, current)
     except ValueError as exc:
         parser.error(str(exc))
     if not (active_batch["start_chapter"] <= args.chapter <= active_batch["end_chapter"]):
@@ -136,7 +136,7 @@ def main() -> int:
             "scene_bridge": scene_bridge,
         },
     }
-    batch_end = is_batch_end(args.chapter, active_batch)
+    batch_end = is_review_unit_end(args.chapter, active_batch)
     if batch_end:
         delta["current_patch"]["reader_review"] = {
             "reviewed_through_chapter": args.chapter,
@@ -149,6 +149,7 @@ def main() -> int:
             "batch_id": active_batch["batch_id"],
             "batch_start_chapter": active_batch["start_chapter"],
             "batch_end_chapter": active_batch["end_chapter"],
+            "review_kind": active_batch.get("review_kind", "batch"),
         }
     elif args.reader_review_reason:
         delta["current_patch"]["reader_review"] = {
@@ -172,10 +173,14 @@ def main() -> int:
             "读完后，局势、关系、认知、压力或期待中，至少哪一项变得更具体？",
             "下一章为什么不能只是重复本章？",
         ],
+        "active_review_unit": active_batch,
+        "review_unit_end": batch_end,
+        # Compatibility aliases for older integrations. Values now describe the
+        # active review unit, which may be a 1-4 chapter final_tail.
         "active_batch": active_batch,
         "batch_end": batch_end,
         "reader_review_required": batch_end or bool(args.reader_review_reason),
-        "note": "脚手架复制上一章地点、视角、场景人物和目标作为待复核值；summary、章节功能标签、真实变化和新的 scene_bridge 仍由主Agent 根据正文裁决。批次末章还必须填写盲读结论。",
+        "note": "脚手架复制上一章地点、视角、场景人物和目标作为待复核值；summary、章节功能标签、真实变化和新的 scene_bridge 仍由主Agent 根据正文裁决。正式五章批次末章或 final-tail 末章还必须填写盲读结论。",
     }, ensure_ascii=False, indent=2))
     return 0
 
