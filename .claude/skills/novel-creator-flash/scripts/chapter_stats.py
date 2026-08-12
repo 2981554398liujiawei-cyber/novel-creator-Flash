@@ -59,8 +59,13 @@ def load_length_settings(root: Path) -> dict[str, int]:
     return settings
 
 
-def load_batch_settings(root: Path) -> dict[str, int]:
-    """Load the five-chapter batch rhythm, with defaults for older projects."""
+def load_batch_settings(root: Path, *, allow_legacy_batch_size: bool = False) -> dict[str, int]:
+    """Load the fixed five-chapter review rhythm.
+
+    ``allow_legacy_batch_size`` is used only by ``configure`` so an older
+    project can be normalized back to five without requiring manual JSON edits.
+    All production/review/commit paths fail closed on any non-five value.
+    """
     path = safe_workspace_path(root, "state/writing-settings.json", allow_missing=True)
     data = load_json(path, default=None)
     if data is None:
@@ -76,8 +81,10 @@ def load_batch_settings(root: Path) -> dict[str, int]:
         "batch_size": _real_int(raw.get("batch_size"), "batch.batch_size", minimum=1),
         "planning_window": _real_int(raw.get("planning_window"), "batch.planning_window", minimum=1),
     }
-    if settings["planning_window"] < settings["batch_size"]:
-        raise ValueError("batch.planning_window must be at least batch.batch_size")
+    if settings["batch_size"] != 5 and not allow_legacy_batch_size:
+        raise ValueError("batch.batch_size must equal the fixed review batch size 5; run configure --batch-size 5")
+    if settings["planning_window"] < 5:
+        raise ValueError("batch.planning_window must be at least 5")
     return settings
 
 

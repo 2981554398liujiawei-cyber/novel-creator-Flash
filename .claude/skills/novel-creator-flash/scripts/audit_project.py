@@ -49,7 +49,7 @@ from common import (
 from chapter_stats import load_batch_settings, load_length_settings
 from production_state import load_production_settings
 from batch_review import chapter_key, current_prose_hash, validate_batch_review_record
-from batch_state import load_active_batch, validate_batch
+from batch_state import load_active_batch, load_active_review_unit, validate_batch, validate_review_unit
 from commit_chapter import derived_entity_ids
 
 VALID_STATUSES = {
@@ -233,6 +233,22 @@ def main() -> int:
     root = Path(args.workspace).resolve(strict=True)
     errors: list[str] = []
     warnings: list[str] = []
+
+    # Custom Claude Code subagents automatically load project CLAUDE.md memory.
+    # Warn when project-level memory appears to contain story answers that can pollute blind reading.
+    blind_memory_keywords = ("幕后", "真凶", "结局", "预期转折", "人物秘密", "盲读标准", "master-outline", "current-arc")
+    for memory_rel in ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"):
+        memory_path = root / memory_rel
+        if memory_path.is_file():
+            try:
+                memory_text = memory_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            hits = [key for key in blind_memory_keywords if key in memory_text]
+            if hits:
+                warnings.append(
+                    f"盲读污染风险：{memory_rel} 含疑似剧情答案/审读提示（{', '.join(hits[:4])}）；自定义 Subagent 会自动加载 CLAUDE.md 层级"
+                )
     try:
         validate_workspace_layout(root)
     except ValueError as exc:
@@ -251,7 +267,7 @@ def main() -> int:
     try:
         production_settings = load_production_settings(root)
     except (ValueError, json.JSONDecodeError) as exc:
-        production_settings = {"writer_pool_size": 5, "blind_reader_count": 3}
+        production_settings = {"writer_pool_size": 5, "blind_reader_count": 1}
         errors.append(f"快速生产设置无效：{exc}")
 
     journal_path = root / ".novel" / "transaction.json"
@@ -386,18 +402,22 @@ def main() -> int:
             if meta.get(key, "") != delta.get(key, ""):
                 errors.append(f"第{number}章 {key} 与状态增量不一致")
         batch_meta = {
+            "review_kind": meta.get("review_kind", "batch"),
             "batch_id": meta.get("batch_id"),
             "start_chapter": meta.get("batch_start_chapter"),
             "end_chapter": meta.get("batch_end_chapter"),
         }
-        batch_values = [batch_meta[key] for key in batch_meta]
+        batch_values = [batch_meta[key] for key in ("batch_id", "start_chapter", "end_chapter")]
         if all(value is None for value in batch_values):
             batch_meta = None
             legacy_batch_metadata_chapters.append(number)
-        elif all(isinstance(batch_meta[key], int) and not isinstance(batch_meta[key], bool) for key in batch_meta):
+        elif all(
+            isinstance(batch_meta[key], int) and not isinstance(batch_meta[key], bool)
+            for key in ("batch_id", "start_chapter", "end_chapter")
+        ):
             batch_meta["batch_size"] = batch_meta["end_chapter"] - batch_meta["start_chapter"] + 1
             batch_meta["next_review_chapter"] = batch_meta["end_chapter"]
-            errors.extend(f"第{number}章：{item}" for item in validate_batch(batch_meta, field="chapter batch"))
+            errors.extend(f"第{number}章：{item}" for item in validate_review_unit(batch_meta, field="chapter review unit"))
             if not (batch_meta["start_chapter"] <= number <= batch_meta["end_chapter"]):
                 errors.append(f"第{number}章不在其记录的批次范围内")
         else:
@@ -550,6 +570,7 @@ def main() -> int:
             errors.append(f"批次审读记录不可用：{record_rel} → {exc}")
             continue
         batch = {
+            "review_kind": meta.get("review_kind", "batch"),
             "batch_id": meta.get("batch_id"),
             "start_chapter": meta.get("batch_start_chapter"),
             "end_chapter": meta.get("batch_end_chapter"),
@@ -723,10 +744,12 @@ def main() -> int:
     try:
         active_batch = load_active_batch(root, current)
         errors.extend(validate_batch(active_batch, field="current.json batch"))
-        if latest >= active_batch["end_chapter"] and (not isinstance(reviewed_through, int) or reviewed_through < active_batch["end_chapter"]):
+        active_review = load_active_review_unit(root, current)
+        errors.extend(validate_review_unit(active_review, field="current.json review unit"))
+        if latest >= active_review["end_chapter"] and (not isinstance(reviewed_through, int) or reviewed_through < active_review["end_chapter"]):
             warnings.append(
                 f"First Reader 盲读节奏已逾期：最新章={latest}，"
-                f"当前批次={active_batch['start_chapter']}-{active_batch['end_chapter']}，"
+                f"当前审读单元={active_review['start_chapter']}-{active_review['end_chapter']}，"
                 f"最近记录到={reviewed_through}"
             )
     except ValueError as exc:

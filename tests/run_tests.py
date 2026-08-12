@@ -23,6 +23,7 @@ sys.path.insert(0, str(SCRIPTS))
 import common  # noqa: E402
 from common import append_jsonl_no_follow, atomic_write_json, workspace_lock  # noqa: E402
 from search_memory import balanced_select, collect  # noqa: E402
+from production_state import reader_agents_for  # noqa: E402
 
 
 def run_script(name: str, *args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -42,9 +43,9 @@ def run_script(name: str, *args: str, check: bool = False) -> subprocess.Complet
 def init_project(path: Path, *, relaxed_length: bool = True, test_batch_size: int = 1) -> None:
     path.mkdir(parents=True, exist_ok=True)
     run_script("init_project.py", str(path), "--title", "未命名作品", "--genre", "通用类型", check=True)
-    # Most regression tests isolate one chapter. Keep production defaults strict,
-    # but use a one-chapter batch in tiny fixtures so the same double-review gate
-    # is exercised without fabricating four unrelated chapters per test.
+    # Formal review batches are always five chapters. Tiny regression fixtures
+    # use the explicit 1-4 chapter final_tail exception instead of mutating
+    # batch_size, so tests exercise the same invariant as production.
     if relaxed_length:
         write_json(path / "state" / "writing-settings.json", {
             "schema": 1,
@@ -53,19 +54,26 @@ def init_project(path: Path, *, relaxed_length: bool = True, test_batch_size: in
                 "target_effective_chars": 1,
                 "soft_maximum_effective_chars": 100000,
             },
-            "batch": {"batch_size": test_batch_size, "planning_window": max(test_batch_size, 10)},
-            "production": {"writer_pool_size": 5, "blind_reader_count": 3},
+            "batch": {"batch_size": 5, "planning_window": 10},
+            "production": {"writer_pool_size": 5, "blind_reader_count": 1},
         })
     if test_batch_size != 5:
+        if test_batch_size not in {1, 2, 3, 4}:
+            raise ValueError("test_batch_size must be 1-5")
         current_path = path / "state" / "current.json"
         current = json.loads(current_path.read_text(encoding="utf-8"))
-        start = int(current.get("latest_chapter", 0)) + 1
-        current["batch"] = {
-            "batch_id": 1,
-            "start_chapter": start,
-            "end_chapter": start + test_batch_size - 1,
+        batch = current["batch"]
+        start_chapter = int(batch["start_chapter"])
+        current["final_tail"] = {
+            "schema": 1,
+            "review_kind": "final_tail",
+            "batch_id": int(batch["batch_id"]),
+            "start_chapter": start_chapter,
+            "end_chapter": start_chapter + test_batch_size - 1,
             "batch_size": test_batch_size,
-            "next_review_chapter": start + test_batch_size - 1,
+            "next_review_chapter": start_chapter + test_batch_size - 1,
+            "chapter_count": test_batch_size,
+            "writer": "main-agent",
         }
         write_json(current_path, current)
 
@@ -73,6 +81,21 @@ def init_project(path: Path, *, relaxed_length: bool = True, test_batch_size: in
 def write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def activate_final_tail(path: Path, count: int = 1) -> None:
+    if count not in {1, 2, 3, 4}:
+        raise ValueError("test final tail count must be 1-4")
+    current_path = path / "state/current.json"
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    batch = current["batch"]
+    start = int(batch["start_chapter"])
+    current["final_tail"] = {
+        "schema": 1, "review_kind": "final_tail", "batch_id": int(batch["batch_id"]),
+        "start_chapter": start, "end_chapter": start + count - 1, "batch_size": count,
+        "next_review_chapter": start + count - 1, "chapter_count": count, "writer": "main-agent",
+    }
+    write_json(current_path, current)
 
 
 def delta_for(chapter: int, title: str, summary: str) -> dict:
@@ -122,34 +145,43 @@ def rewrite_draft(path: Path, chapter: int, title: str, body: str) -> None:
     )
 
 
-def finalize_batch_review_from_delta(path: Path, chapter: int, data: dict) -> None:
+def _active_review_unit(path: Path) -> dict:
     current = json.loads((path / "state/current.json").read_text(encoding="utf-8"))
-    batch = current.get("batch", {})
-    if chapter != batch.get("end_chapter"):
+    return current.get("final_tail") or current.get("batch", {})
+
+
+def finalize_batch_review_from_delta(path: Path, chapter: int, data: dict) -> None:
+    unit = _active_review_unit(path)
+    if chapter != unit.get("end_chapter"):
         return
     reader = data.get("current_patch", {}).get("reader_review")
     if not isinstance(reader, dict) or reader.get("reason") != "batch":
         return
     reader.setdefault("issue_tags", [])
     reader.setdefault("highest_value_revision", "")
-    reader.setdefault("batch_id", batch.get("batch_id"))
-    reader.setdefault("batch_start_chapter", batch.get("start_chapter"))
-    reader.setdefault("batch_end_chapter", batch.get("end_chapter"))
-    record_path = path / "state" / "reviews" / f"batch-{batch['start_chapter']:04d}-{batch['end_chapter']:04d}.json"
+    reader.setdefault("batch_id", unit.get("batch_id"))
+    reader.setdefault("batch_start_chapter", unit.get("start_chapter"))
+    reader.setdefault("batch_end_chapter", unit.get("end_chapter"))
+    reader.setdefault("review_kind", unit.get("review_kind", "batch"))
+    prefix = "final-tail" if unit.get("review_kind") == "final_tail" else "batch"
+    record_path = path / "state" / "reviews" / f"{prefix}-{unit['start_chapter']:04d}-{unit['end_chapter']:04d}.json"
     if record_path.is_file():
         existing = json.loads(record_path.read_text(encoding="utf-8"))
         if existing.get("finalized") is True:
             return
-    prepared = run_script("prepare_batch_review.py", str(path), check=True)
+    extra = ["--continuity-risk", "low"]
+    if unit.get("review_kind") == "final_tail":
+        extra += ["--final-tail-count", str(unit["chapter_count"])]
+    prepared = run_script("prepare_batch_review.py", str(path), *extra, check=True)
     payload = json.loads(prepared.stdout)
     record_path = path / payload["output"]
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    required = int(record.get("first_reader", {}).get("required_count", 3))
+    required = int(record.get("first_reader", {}).get("required_count", 1))
     record["first_reader"] = {
         "status": "completed",
         "required_count": required,
-        "completed_readers": ["novel-fast-reader-flow", "novel-fast-reader-character", "novel-fast-reader-hook"][:required],
-        "available_readers": ["novel-fast-reader-flow", "novel-fast-reader-character", "novel-fast-reader-hook"][:required],
+        "completed_readers": list(reader_agents_for(required)),
+        "available_readers": list(reader_agents_for(required)),
         "verdict": reader.get("verdict"),
         "ending_pull": reader.get("ending_pull"),
         "revision_applied": reader.get("revision_applied"),
@@ -170,9 +202,8 @@ def commit(
     prepare_review: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if prepare_review:
-        current = json.loads((path / "state/current.json").read_text(encoding="utf-8"))
-        batch = current.get("batch", {})
-        if chapter == batch.get("end_chapter") and "reader_review" not in data.get("current_patch", {}):
+        unit = _active_review_unit(path)
+        if chapter == unit.get("end_chapter") and "reader_review" not in data.get("current_patch", {}):
             data.setdefault("current_patch", {})["reader_review"] = {
                 "reviewed_through_chapter": chapter,
                 "reason": "batch",
@@ -181,12 +212,13 @@ def commit(
                 "revision_applied": True,
                 "issue_tags": [],
                 "highest_value_revision": "",
-                "batch_id": batch.get("batch_id"),
-                "batch_start_chapter": batch.get("start_chapter"),
-                "batch_end_chapter": batch.get("end_chapter"),
+                "batch_id": unit.get("batch_id"),
+                "batch_start_chapter": unit.get("start_chapter"),
+                "batch_end_chapter": unit.get("end_chapter"),
+                "review_kind": unit.get("review_kind", "batch"),
             }
         try:
-            finalize_batch_review_from_delta(path, int(batch.get("end_chapter", chapter)), data)
+            finalize_batch_review_from_delta(path, int(unit.get("end_chapter", chapter)), data)
         except AssertionError:
             if expect_ok:
                 raise
@@ -322,12 +354,13 @@ class NovelSkillTests(unittest.TestCase):
         arc_draft.write_text("# ARC-001 当前故事弧\n\n- 本章已经推进。\n", encoding="utf-8")
         data = delta_for(1, "起点", "开始")
         current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
-        batch = current["batch"]
+        batch = current.get("final_tail") or current["batch"]
         data["current_patch"]["reader_review"] = {
             "reviewed_through_chapter": 1, "reason": "batch", "verdict": "acceptable",
             "ending_pull": "fair", "revision_applied": True, "issue_tags": [],
             "highest_value_revision": "", "batch_id": batch["batch_id"],
             "batch_start_chapter": batch["start_chapter"], "batch_end_chapter": batch["end_chapter"],
+            "review_kind": batch.get("review_kind", "batch"),
         }
         finalize_batch_review_from_delta(self.root, 1, data)
         write_json(self.root / "state" / "deltas" / "chapter-0001.json", data)
@@ -345,6 +378,7 @@ class NovelSkillTests(unittest.TestCase):
         d1["entity_changes"] = [{"id": "CHAR-0001", "create": True, "patch": character}]
         draft(self.root, 1, "泄密")
         commit(self.root, 1, d1)
+        activate_final_tail(self.root)
 
         d2 = delta_for(2, "得知", "角色正式得知秘密")
         d2["events"] = [{"type": "knowledge_gained", "character_id": "CHAR-0001", "fact_id": "FACT-0001"}]
@@ -368,6 +402,7 @@ class NovelSkillTests(unittest.TestCase):
         commit(self.root, 1, d1)
         meta = json.loads((self.root / "state" / "chapters" / "chapter-0001.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["entities"], ["CHAR-0001"])
+        activate_final_tail(self.root)
 
         d2 = delta_for(2, "依赖", "错误依赖")
         d2["depends_on_events"] = ["EVT-9999-999"]
@@ -537,6 +572,7 @@ class NovelSkillTests(unittest.TestCase):
         entity = json.loads((self.root / "state/entities/characters/CHAR-0001.json").read_text(encoding="utf-8"))
         self.assertEqual(entity["created_chapter"], 1)
         self.assertTrue((self.root / "state/baselines/CHAR-0001.json").is_file())
+        activate_final_tail(self.root)
 
         d2 = delta_for(2, "篡改", "试图改写历史")
         d2["entity_changes"] = [{"id": "CHAR-0001", "patch": {"initial_knowledge": ["FACT-0001"]}}]
@@ -595,6 +631,7 @@ class NovelSkillTests(unittest.TestCase):
         d1["entity_changes"] = [{"id": "CHAR-0001", "create": True, "patch": character}]
         draft(self.root, 1, "建立角色")
         commit(self.root, 1, d1)
+        activate_final_tail(self.root)
 
         d2 = delta_for(2, "状态变化", "角色状态变化")
         d2["events"] = [{"type": "character_status_changed", "character_id": "CHAR-0001", "status": "dead", "sequence": 5}]
@@ -853,68 +890,103 @@ class NovelSkillTests(unittest.TestCase):
     def test_novel_creator_skill_and_agent_task_cards(self) -> None:
         skill_text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: novel-creator-flash", skill_text)
-        self.assertIn("主Agent是总策划", skill_text)
-        self.assertIn("默认五名写手并行", skill_text)
-        self.assertIn("默认三名盲读者并行", skill_text)
+        self.assertIn("每个写手一次负责连续 5 章", skill_text)
+        self.assertIn("启用 10 个写手", skill_text)
+        self.assertIn("规划 50 章", skill_text)
         self.assertIn("prepare-production", skill_text)
         self.assertIn("production-status", skill_text)
-        self.assertIn("唯一输出路径", skill_text)
-        self.assertNotIn("novel-continuity-reviewer", skill_text)
-        self.assertNotIn("章节合同", skill_text)
+        self.assertIn('Bash("${CLAUDE_SKILL_DIR}/scripts/novelctl-skill" *)', skill_text)
+        self.assertNotIn('Bash("${CLAUDE_SKILL_DIR}/scripts/novelctl" *)', skill_text)
+        self.assertIn("并行执行席位", skill_text)
+        self.assertIn("novel-fast-continuity-reviewer", skill_text)
+        self.assertIn("--continuity-risk low|high", skill_text)
+        self.assertIn("CLAUDE.md", skill_text)
+        self.assertNotIn("Humanizer Agent", skill_text)
 
         agents_root = ROOT / ".claude" / "agents"
-        expected = {*(f"novel-fast-writer-{i}.md" for i in range(1, 6)),
-                    "novel-fast-reader-flow.md", "novel-fast-reader-character.md", "novel-fast-reader-hook.md"}
+        expected = {*(f"novel-fast-writer-{i}.md" for i in range(1, 11)),
+                    "novel-fast-reader-flow.md", "novel-fast-reader-character.md", "novel-fast-reader-hook.md",
+                    "novel-fast-continuity-reviewer.md"}
         self.assertEqual({path.name for path in agents_root.glob("*.md")}, expected)
-        for index in range(1, 6):
+        for index in range(1, 11):
             writer = (agents_root / f"novel-fast-writer-{index}.md").read_text(encoding="utf-8")
             self.assertIn("background: true", writer)
-            self.assertIn("permissionMode: acceptEdits", writer)
-            self.assertIn(f"novel-fast-writer-{index}", writer)
-            self.assertIn(".novel/production/", writer)
-            self.assertIn("不得写 canonical staging", writer)
-            self.assertIn("不可信创作材料", writer)
-            self.assertIn("newly_invented_details", writer)
-            self.assertIn("character_micro_changes", writer)
-            self.assertIn("strong_lines_or_moments", writer)
-        self.assertIn("Five-Chapter Harmonization", skill_text)
-        self.assertIn("Prose Craft Pass", skill_text)
-        self.assertNotIn("主 Claude", skill_text)
-        self.assertNotIn("主Claude", skill_text)
+            self.assertIn("连续五章原料块", writer)
+            self.assertIn("按章号顺序写完", writer)
+            self.assertIn("possible_continuity_risks", writer)
+            self.assertIn("report JSON", writer)
         for name in ("flow", "character", "hook"):
             reader = (agents_root / f"novel-fast-reader-{name}.md").read_text(encoding="utf-8")
-            self.assertIn("  - TaskList", reader)
+            self.assertNotIn("TodoWrite", reader)
+            self.assertIn("Read(.novel/blind-packets/**)", reader)
             self.assertIn("background: true", reader)
             reader_tools = reader.split("tools:", 1)[1].split("disallowedTools:", 1)[0]
-            self.assertNotIn("Read", reader_tools)
-            self.assertIn("不可信", reader)
-            self.assertIn("location:", reader)
-            self.assertIn("evidence:", reader)
-            self.assertIn("reader_effect:", reader)
-            self.assertIn("minimal_action:", reader)
+            self.assertIn("Read(.novel/blind-packets/**)", reader_tools)
+        self.assertIn("综合盲读主席", (agents_root / "novel-fast-reader-flow.md").read_text(encoding="utf-8"))
 
     def test_parallel_production_manifest_and_status(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
         configured = run_script(
             "configure_project.py", str(self.root),
-            "--writer-pool-size", "5", "--blind-reader-count", "3",
-            "--min-chars", "10", "--target-chars", "12", "--soft-max-chars", "30",
-            check=True,
+            "--writer-pool-size", "10", "--blind-reader-count", "1",
+            "--min-chars", "10", "--target-chars", "12", "--soft-max-chars", "30", check=True,
         )
-        self.assertEqual(json.loads(configured.stdout)["production"]["writer_pool_size"], 5)
-        prepared = run_script("prepare_production.py", str(self.root), check=True)
+        self.assertEqual(json.loads(configured.stdout)["production"]["writer_pool_size"], 10)
+        prepared = run_script("prepare_production.py", str(self.root), "--writers", "10", "--chapters", "50", check=True)
         payload = json.loads(prepared.stdout)
-        self.assertEqual(len(payload["assignments"]), 5)
-        self.assertEqual(len({item["writer"] for item in payload["assignments"]}), 5)
+        self.assertEqual(payload["planned_chapters"], 50)
+        self.assertEqual(payload["writer_count"], 10)
+        self.assertEqual(len(payload["assignments"]), 10)
+        self.assertEqual(payload["assignments"][0]["start_chapter"], 1)
+        self.assertEqual(payload["assignments"][-1]["end_chapter"], 50)
         for item in payload["assignments"]:
-            target = self.root / item["output"]
+            self.assertEqual(len(item["outputs"]), 5)
+            for chapter, rel in zip(range(item["start_chapter"], item["end_chapter"] + 1), item["outputs"]):
+                target = self.root / rel; target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"# 第{chapter}章 原料\n\n有效正文内容甲乙丙丁戊己庚辛壬癸。\n", encoding="utf-8")
+            report = self.root / item["report"]
+            write_json(report, {
+                "schema": 1, "writer": item["writer"], "start_chapter": item["start_chapter"], "end_chapter": item["end_chapter"],
+                "newly_invented_details": [], "character_micro_changes": [], "new_promises": [], "motifs_or_objects": [],
+                "strong_lines_or_moments": [], "possible_continuity_risks": [],
+            })
+        status = json.loads(run_script("production_status.py", str(self.root), check=True).stdout)
+        self.assertTrue(status["all_ready"])
+        self.assertEqual(len(status["blocks"]), 10)
+        self.assertFalse(status["continuity_risk_detected"])
+
+    def test_persisted_writer_risk_forces_high_continuity_review(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--writer-pool-size", "1", "--blind-reader-count", "1",
+            "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000", check=True,
+        )
+        prepared = json.loads(run_script(
+            "prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True
+        ).stdout)
+        assignment = prepared["assignments"][0]
+        for number, rel in zip(range(1, 6), assignment["outputs"]):
+            target = self.root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(f"# 第{item['chapter']}章 原料\n\n有效正文内容甲乙丙丁戊己庚辛壬癸。\n", encoding="utf-8")
-        status = run_script("production_status.py", str(self.root), check=True)
-        result = json.loads(status.stdout)
-        self.assertTrue(result["all_ready"])
-        self.assertEqual(len(result["outputs"]), 5)
-        self.assertFalse(any((self.root / ".novel/staging" / f"chapter-{n:04d}.md").exists() for n in range(1, 6)))
+            target.write_text(f"# 第{number}章 原料\n\n正文内容。\n", encoding="utf-8")
+            draft(self.root, number, f"批次{number}", "正文内容。")
+        write_json(self.root / assignment["report"], {
+            "schema": 1, "writer": assignment["writer"],
+            "start_chapter": 1, "end_chapter": 5,
+            "newly_invented_details": [], "character_micro_changes": [],
+            "new_promises": [], "motifs_or_objects": [], "strong_lines_or_moments": [],
+            "possible_continuity_risks": ["第三章道具归属可能与第一章冲突"],
+        })
+        blocked = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low")
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("must be high", blocked.stderr)
+        high = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "high", check=True)
+        payload = json.loads(high.stdout)
+        self.assertTrue(payload["writer_report_risks"])
+        record = json.loads((self.root / payload["output"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["continuity"]["writer_report_risk_count"], 1)
+        self.assertTrue(any("道具归属" in item for item in record["continuity"]["risk_reasons"]))
 
     def test_reader_panel_requires_configured_count(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
@@ -925,7 +997,7 @@ class NovelSkillTests(unittest.TestCase):
         )
         for number in range(1, 6):
             draft(self.root, number, f"批次{number}", "正文内容。")
-        prepared = run_script("prepare_batch_review.py", str(self.root), check=True)
+        prepared = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low", check=True)
         record_path = self.root / json.loads(prepared.stdout)["output"]
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["first_reader"].update({
@@ -937,15 +1009,70 @@ class NovelSkillTests(unittest.TestCase):
             "issue_tags": [],
             "highest_value_revision": "",
         })
-        record["continuity"] = {
+        record["continuity"].update({
             "status": "completed", "checked_by": "main-agent",
             "blocking_count": 0, "warning_count": 0,
-        }
+        })
         write_json(record_path, record)
         blocked = run_script("finalize_batch_review.py", str(self.root))
         self.assertNotEqual(blocked.returncode, 0)
         self.assertIn("fewer completed readers", blocked.stderr)
         record["first_reader"]["completed_readers"].append("novel-fast-reader-hook")
+        write_json(record_path, record)
+        finalized = run_script("finalize_batch_review.py", str(self.root))
+        self.assertEqual(finalized.returncode, 0, finalized.stderr)
+
+    def test_two_reader_panel_defaults_to_flow_and_hook(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--blind-reader-count", "2", "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000",
+            check=True,
+        )
+        prepared = json.loads(run_script("prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True).stdout)
+        self.assertEqual([job["reader"] for job in prepared["reader_jobs"]], ["novel-fast-reader-flow", "novel-fast-reader-hook"])
+        for number in range(1, 6):
+            draft(self.root, number, f"批次{number}", "正文内容。")
+        review = json.loads(run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low", check=True).stdout)
+        record = json.loads((self.root / review["output"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["first_reader"]["available_readers"], ["novel-fast-reader-flow", "novel-fast-reader-hook"])
+
+    def test_high_risk_batch_requires_fast_continuity_reviewer(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--blind-reader-count", "2", "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000",
+            check=True,
+        )
+        for number in range(1, 6):
+            draft(self.root, number, f"批次{number}", "正文内容。")
+        prepared = json.loads(run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-risk", "high",
+            "--risk-reason", "writer-3 reported item ownership drift",
+            check=True,
+        ).stdout)
+        record_path = self.root / prepared["output"]
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["continuity"]["risk_level"], "high")
+        record["first_reader"].update({
+            "status": "completed",
+            "completed_readers": ["novel-fast-reader-flow", "novel-fast-reader-hook"],
+            "verdict": "acceptable",
+            "ending_pull": "fair",
+            "revision_applied": True,
+            "issue_tags": [],
+            "highest_value_revision": "",
+        })
+        record["continuity"].update({
+            "status": "completed", "checked_by": "main-agent",
+            "blocking_count": 0, "warning_count": 0,
+        })
+        write_json(record_path, record)
+        blocked = run_script("finalize_batch_review.py", str(self.root))
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("novel-fast-continuity-reviewer", blocked.stderr)
+        record["continuity"]["checked_by"] = "novel-fast-continuity-reviewer"
         write_json(record_path, record)
         finalized = run_script("finalize_batch_review.py", str(self.root))
         self.assertEqual(finalized.returncode, 0, finalized.stderr)
@@ -959,7 +1086,7 @@ class NovelSkillTests(unittest.TestCase):
         )
         prepared = json.loads(run_script("prepare_production.py", str(self.root), check=True).stdout)
         first = prepared["assignments"][0]
-        raw = self.root / first["output"]
+        raw = self.root / first["outputs"][0]
         raw.parent.mkdir(parents=True, exist_ok=True)
         raw.write_text("# 第1章 原料\n\n只存在于写手原料目录。\n", encoding="utf-8")
         write_json(self.root / "state/deltas/chapter-0001.json", delta_for(1, "原料", "测试"))
@@ -975,7 +1102,7 @@ class NovelSkillTests(unittest.TestCase):
         self.assertEqual(settings["chapter_length"]["minimum_effective_chars"], 2700)
         self.assertEqual(settings["chapter_length"]["target_effective_chars"], 3200)
         self.assertEqual(settings["batch"], {"batch_size": 5, "planning_window": 10})
-        self.assertEqual(settings["production"], {"writer_pool_size": 5, "blind_reader_count": 3})
+        self.assertEqual(settings["production"], {"writer_pool_size": 5, "blind_reader_count": 1})
         self.assertNotIn("maximum_" + "expansion_attempts", settings["chapter_length"])
         (self.root / ".novel/staging/chapter-0001.md").write_text(
             "# 第1章 测试\n\n甲，乙！abc 12。\n", encoding="utf-8"
@@ -1005,18 +1132,17 @@ class NovelSkillTests(unittest.TestCase):
         self.assertIn("章节篇幅设置无效", report)
 
     def test_short_chapter_is_blocked_and_override_is_recorded(self) -> None:
-        self.root.mkdir(parents=True)
-        run_script("init_project.py", str(self.root), "--title", "门禁测试", "--genre", "通用", check=True)
-        run_script("configure_project.py", str(self.root), "--batch-size", "1", "--planning-window", "1", check=True)
+        init_project(self.root, relaxed_length=False, test_batch_size=1)
         draft(self.root, 1, "起点", "正文内容")
         data = delta_for(1, "起点", "故事开始")
         current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
-        batch = current["batch"]
+        batch = current.get("final_tail") or current["batch"]
         data["current_patch"]["reader_review"] = {
             "reviewed_through_chapter": 1, "reason": "batch", "verdict": "acceptable",
             "ending_pull": "fair", "revision_applied": True, "issue_tags": [],
             "highest_value_revision": "", "batch_id": batch["batch_id"],
             "batch_start_chapter": batch["start_chapter"], "batch_end_chapter": batch["end_chapter"],
+            "review_kind": batch.get("review_kind", "batch"),
         }
         write_json(self.root / "state/deltas/chapter-0001.json", data)
         blocked = run_script("novelctl.py", "commit", str(self.root), "--chapter", "1")
@@ -1071,16 +1197,20 @@ class NovelSkillTests(unittest.TestCase):
         project = Path(self.temp.name) / "install-project"
         project.mkdir()
         installer = ROOT / "install.sh"
+        ps_installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("[Parameter(Position=0)]", ps_installer)
+        self.assertTrue((ROOT / "tests/smoke_claude_skill_permissions.py").is_file())
         first = subprocess.run(
-            ["bash", str(installer), "--scope", "project", "--project-path", str(project)],
+            ["bash", str(installer), str(project)],
             text=True, capture_output=True, encoding="utf-8", timeout=30,
         )
         self.assertEqual(first.returncode, 0, first.stderr)
         skill_target = project / ".claude/skills/novel-creator-flash"
         agents_target = project / ".claude/agents"
         self.assertTrue((skill_target / "SKILL.md").is_file())
-        agent_names = [*(f"novel-fast-writer-{i}.md" for i in range(1, 6)),
-                       "novel-fast-reader-flow.md", "novel-fast-reader-character.md", "novel-fast-reader-hook.md"]
+        agent_names = [*(f"novel-fast-writer-{i}.md" for i in range(1, 11)),
+                       "novel-fast-reader-flow.md", "novel-fast-reader-character.md", "novel-fast-reader-hook.md",
+                       "novel-fast-continuity-reviewer.md"]
         for name in agent_names:
             self.assertTrue((agents_target / name).is_file())
         (skill_target / "old-marker.txt").write_text("old skill", encoding="utf-8")
@@ -1481,7 +1611,7 @@ class NovelSkillTests(unittest.TestCase):
             expect_ok=False, prepare_review=False,
         )
         self.assertNotEqual(blocked_first.returncode, 0)
-        self.assertIn("finalized double-review record", blocked_first.stderr)
+        self.assertIn("finalized review record", blocked_first.stderr)
         finalize_batch_review_from_delta(self.root, 5, end_data)
         for number in range(1, 5):
             data = delta_for(number, f"第{number}步", f"完成第{number}步")
@@ -1524,14 +1654,15 @@ class NovelSkillTests(unittest.TestCase):
 
     def test_reader_isolation_voice_examples_and_feedback_lessons_contract(self) -> None:
         reader = (ROOT / ".claude/agents/novel-fast-reader-flow.md").read_text(encoding="utf-8")
-        self.assertIn("  - TaskList", reader)
+        self.assertNotIn("TodoWrite", reader)
+        self.assertIn("Read(.novel/blind-packets/**)", reader)
         self.assertNotIn("  - TaskStop", reader)
         self.assertIn("五章", reader)
-        self.assertIn("Flow + Prose", reader)
+        self.assertIn("综合盲读主席", reader)
         self.assertIn("most_alive", reader)
         self.assertIn("flattest_or_generic", reader)
         reader_tools = reader.split("tools:", 1)[1].split("disallowedTools:", 1)[0]
-        self.assertNotIn("Read", reader_tools)
+        self.assertIn("Read(.novel/blind-packets/**)", reader_tools)
         self.assertNotIn("Glob", reader_tools)
         self.assertNotIn("Grep", reader_tools)
         lessons = (ASSETS / "creative-lessons-template.md").read_text(encoding="utf-8")
@@ -1549,29 +1680,48 @@ class NovelSkillTests(unittest.TestCase):
         template["voice"]["voice_examples"].append("第四句")
         self.assertTrue(any("at most 3" in item for item in validate_entity_data(template, "CHAR-0001")))
 
+    def test_audit_warns_when_claude_memory_may_pollute_blind_reading(self) -> None:
+        init_project(self.root, relaxed_length=False)
+        (self.root / "CLAUDE.md").write_text("幕后真凶与预期转折不应暴露给盲读者。\n", encoding="utf-8")
+        proc = run_script("audit_project.py", str(self.root), check=True)
+        payload = json.loads(proc.stdout)
+        self.assertGreaterEqual(payload["warnings"], 1)
+        report = (self.root / payload["output"]).read_text(encoding="utf-8")
+        self.assertIn("盲读污染风险", report)
+        self.assertIn("CLAUDE.md", report)
+
     def test_audit_warns_for_overdue_reader_review_and_repetitive_chapter_function(self) -> None:
-        init_project(self.root)
-        for number in range(1, 9):
-            draft(self.root, number, f"推进{number}", "人物持续推进目标。")
-            data = delta_for(number, f"推进{number}", f"推进到第{number}步")
-            data["chapter_function"] = "advance"
-            data["dominant_change"] = f"推进到第{number}步"
-            if number == 5:
-                data["current_patch"]["reader_review"] = {
-                    "reviewed_through_chapter": 5,
-                    "reason": "batch",
-                    "verdict": "acceptable",
-                    "ending_pull": "fair",
-                    "revision_applied": True,
-                }
-            commit(self.root, number, data)
+        init_project(self.root, test_batch_size=5)
+        # Commit two real five-chapter review batches, then deliberately stale the
+        # current reader pointer so audit can report the overdue cadence.
+        for batch_start in (1, 6):
+            batch_end = batch_start + 4
+            for number in range(batch_start, batch_end + 1):
+                draft(self.root, number, f"推进{number}", "人物持续推进目标。")
+            current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
+            batch = current["batch"]
+            end_data = delta_for(batch_end, f"推进{batch_end}", f"推进到第{batch_end}步")
+            end_data["chapter_function"] = "advance"
+            end_data["dominant_change"] = f"推进到第{batch_end}步"
+            end_data["current_patch"]["reader_review"] = {
+                "reviewed_through_chapter": batch_end, "reason": "batch",
+                "verdict": "acceptable", "ending_pull": "fair",
+                "revision_applied": True, "issue_tags": [], "highest_value_revision": "",
+                "batch_id": batch["batch_id"],
+                "batch_start_chapter": batch["start_chapter"],
+                "batch_end_chapter": batch["end_chapter"],
+            }
+            finalize_batch_review_from_delta(self.root, batch_end, end_data)
+            for number in range(batch_start, batch_end):
+                data = delta_for(number, f"推进{number}", f"推进到第{number}步")
+                data["chapter_function"] = "advance"
+                data["dominant_change"] = f"推进到第{number}步"
+                commit(self.root, number, data)
+            commit(self.root, batch_end, end_data)
         current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
         current["reader_review"] = {
-            "reviewed_through_chapter": 0,
-            "reason": "",
-            "verdict": "",
-            "ending_pull": "",
-            "revision_applied": None,
+            "reviewed_through_chapter": 0, "reason": "", "verdict": "",
+            "ending_pull": "", "revision_applied": None,
         }
         write_json(self.root / "state/current.json", current)
         audit = run_script("audit_project.py", str(self.root))
@@ -1613,7 +1763,7 @@ class NovelSkillTests(unittest.TestCase):
 
 
     def test_batch_anchor_supports_existing_chapters_and_future_size_change(self) -> None:
-        init_project(self.root)
+        init_project(self.root, test_batch_size=5)
         current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
         current["latest_chapter"] = 2
         current.pop("batch", None)
@@ -1642,14 +1792,14 @@ class NovelSkillTests(unittest.TestCase):
             "batch_end_chapter": 7,
         }
         finalize_batch_review_from_delta(self.root, 7, end_delta)
-        # Changing the configured size mid-batch affects only the next batch.
-        changed = run_script("configure_project.py", str(self.root), "--batch-size", "3", check=True)
-        changed_payload = json.loads(changed.stdout)
-        self.assertEqual(changed_payload["active_batch"]["end_chapter"], 7)
+        # Review batch size is a permanent five-chapter invariant.
+        changed = run_script("configure_project.py", str(self.root), "--batch-size", "3")
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertIn("fixed at 5", changed.stderr)
         commit(self.root, 3, delta_for(3, "续写3", "推进到3"))
         reanchor = run_script(
             "configure_project.py", str(self.root),
-            "--batch-size", "4", "--batch-start", "4",
+            "--batch-size", "5", "--batch-start", "4",
         )
         self.assertNotEqual(reanchor.returncode, 0)
         self.assertIn("cannot re-anchor", reanchor.stderr)
@@ -1658,7 +1808,7 @@ class NovelSkillTests(unittest.TestCase):
         commit(self.root, 7, end_delta)
         current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
         self.assertEqual(current["batch"]["start_chapter"], 8)
-        self.assertEqual(current["batch"]["end_chapter"], 10)
+        self.assertEqual(current["batch"]["end_chapter"], 12)
         meta = json.loads((self.root / "state/chapters/chapter-0007.json").read_text(encoding="utf-8"))
         self.assertEqual((meta["batch_start_chapter"], meta["batch_end_chapter"]), (3, 7))
         audit = run_script("audit_project.py", str(self.root), "--allow-gaps")
@@ -1668,7 +1818,7 @@ class NovelSkillTests(unittest.TestCase):
         init_project(self.root, test_batch_size=5)
         for number in range(1, 6):
             draft(self.root, number, f"批次{number}", "正文内容。")
-        prepared = run_script("prepare_batch_review.py", str(self.root), check=True)
+        prepared = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low", check=True)
         record_path = self.root / json.loads(prepared.stdout)["output"]
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["first_reader"] = {
@@ -1723,8 +1873,62 @@ class NovelSkillTests(unittest.TestCase):
         })
 
 
+    def test_skill_bound_wrapper_binds_current_project_and_rejects_workspace_override(self) -> None:
+        self.root.mkdir(parents=True)
+        outside = Path(self.temp.name) / "outside-workspace"
+        blocked = subprocess.run(
+            [sys.executable, str(SCRIPTS / "novelctl_skill.py"), "init", str(outside), "--title", "越界"],
+            cwd=self.root, text=True, capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}, timeout=30,
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertFalse(outside.exists())
+        self.assertFalse((self.root / "project.md").exists())
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPTS / "novelctl_skill.py"), "init", "--title", "绑定项目", "--genre", "通用"],
+            cwd=self.root, text=True, capture_output=True, encoding="utf-8",
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}, timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue((self.root / "project.md").is_file())
+
+    def test_fixed_review_batch_and_main_agent_tail_production(self) -> None:
+        self.root.mkdir(parents=True)
+        bad = run_script("init_project.py", str(self.root), "--batch-size", "3")
+        self.assertNotEqual(bad.returncode, 0)
+        shutil.rmtree(self.root, ignore_errors=True)
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        prepared = run_script("prepare_production.py", str(self.root), "--writers", "2", "--chapters", "12", check=True)
+        payload = json.loads(prepared.stdout)
+        self.assertEqual(payload["writer_count"], 2)
+        self.assertEqual([(a["start_chapter"], a["end_chapter"]) for a in payload["assignments"]], [(1, 5), (6, 10)])
+        self.assertEqual(payload["main_agent_tail"]["start_chapter"], 11)
+        self.assertEqual(payload["main_agent_tail"]["end_chapter"], 12)
+        self.assertEqual(payload["main_agent_tail"]["writer"], "main-agent")
+
+    def test_under_five_production_uses_no_writer_and_final_tail_blind_packet(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        prepared = run_script("prepare_production.py", str(self.root), "--chapters", "3", check=True)
+        payload = json.loads(prepared.stdout)
+        self.assertEqual(payload["writer_count"], 0)
+        self.assertEqual(payload["assignments"], [])
+        self.assertEqual(payload["main_agent_tail"]["chapter_count"], 3)
+        for number in range(1, 4):
+            draft(self.root, number, f"尾声{number}", f"尾声正文{number}。")
+        reviewed = run_script(
+            "prepare_batch_review.py", str(self.root), "--continuity-risk", "low", "--final-tail-count", "3", check=True
+        )
+        record = json.loads((self.root / json.loads(reviewed.stdout)["output"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["review_kind"], "final_tail")
+        packet = self.root / record["blind_packet"]["path"]
+        self.assertTrue(packet.is_file())
+        self.assertIn("第3章", packet.read_text(encoding="utf-8"))
+
 
 FAST_TESTS = {
+    "test_skill_bound_wrapper_binds_current_project_and_rejects_workspace_override",
+    "test_fixed_review_batch_and_main_agent_tail_production",
+    "test_under_five_production_uses_no_writer_and_final_tail_blind_packet",
     "test_basic_commit_context_audit_export",
     "test_commit_requires_minimum_handoff_tuple",
     "test_default_length_settings_and_stats_metric",
@@ -1732,7 +1936,10 @@ FAST_TESTS = {
     "test_invalid_length_settings_are_reported_without_traceback",
     "test_novel_creator_skill_and_agent_task_cards",
     "test_parallel_production_manifest_and_status",
+    "test_persisted_writer_risk_forces_high_continuity_review",
     "test_reader_panel_requires_configured_count",
+    "test_two_reader_panel_defaults_to_flow_and_hook",
+    "test_high_risk_batch_requires_fast_continuity_reviewer",
     "test_prepare_delta_scaffolds_title_progress_questions_and_scene_bridge",
     "test_prepare_delta_scaffolds_batch_reader_review_only_at_batch_end",
     "test_reader_isolation_voice_examples_and_feedback_lessons_contract",

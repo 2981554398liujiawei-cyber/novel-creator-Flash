@@ -31,7 +31,7 @@ COMMANDS = {
 def main() -> int:
     if len(sys.argv) < 2 or sys.argv[1] in {"-h", "--help", "help"}:
         commands = "\n  ".join(sorted(COMMANDS))
-        print("Novel Creator helper\n\nUsage:\n  novelctl.py <command> [arguments]\n\nCommands:\n  " + commands)
+        print("Novel Creator Flash helper\n\nUsage:\n  novelctl.py <command> [arguments]\n\nCommands:\n  " + commands)
         return 0
     command = sys.argv[1]
     module_name = COMMANDS.get(command)
