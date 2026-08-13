@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+for candidate in python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    if "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1; then
+      exec "$candidate" "$SCRIPT_DIR/novelctl_skill.py" "$@"
+    fi
+  fi
+done
+if command -v py >/dev/null 2>&1; then
+  if py -3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' >/dev/null 2>&1; then
+    exec py -3 "$SCRIPT_DIR/novelctl_skill.py" "$@"
+  fi
+fi
+echo "Novel Creator requires Python 3.10+ (python3, python, or py -3)." >&2
+exit 127

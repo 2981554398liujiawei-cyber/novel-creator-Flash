@@ -169,7 +169,7 @@ def finalize_batch_review_from_delta(path: Path, chapter: int, data: dict) -> No
         existing = json.loads(record_path.read_text(encoding="utf-8"))
         if existing.get("finalized") is True:
             return
-    extra = ["--continuity-risk", "low"]
+    extra = ["--continuity-review", "skip", "--continuity-reason", "test fixture", "--imported"]
     if unit.get("review_kind") == "final_tail":
         extra += ["--final-tail-count", str(unit["chapter_count"])]
     prepared = run_script("prepare_batch_review.py", str(path), *extra, check=True)
@@ -188,7 +188,9 @@ def finalize_batch_review_from_delta(path: Path, chapter: int, data: dict) -> No
         "issue_tags": reader.get("issue_tags", []),
         "highest_value_revision": reader.get("highest_value_revision", ""),
     }
-    record["continuity"] = {"status": "completed", "checked_by": "main-agent", "blocking_count": 0, "warning_count": 0}
+    record["pure_reader"] = {"status": "completed", "response": "自然阅读反馈"}
+    record["feedback_adjudication"] = {"status": "completed", "decisions": []}
+    record["continuity"] = {"decision": "skip", "reasons": ["test fixture"], "status": "completed", "checked_by": "main-agent", "blocking_count": 0, "warning_count": 0}
     write_json(record_path, record)
     run_script("finalize_batch_review.py", str(path), check=True)
 
@@ -459,7 +461,7 @@ class NovelSkillTests(unittest.TestCase):
         draft(self.root, 1, "起点", "旧正文。")
         commit(self.root, 1, delta_for(1, "起点", "旧版本"))
         rewrite_draft(self.root, 1, "起点", "新正文，可能改变事实。")
-        rewrite = run_script("rewrite_prose.py", str(self.root), "--chapter", "1", check=True)
+        rewrite = run_script("rewrite_prose.py", str(self.root), "--chapter", "1", "--review-level", "prose", check=True)
         data = json.loads(rewrite.stdout)
         self.assertTrue(data["review_required"])
         self.assertTrue((self.root / data["archive"]).is_file())
@@ -542,7 +544,7 @@ class NovelSkillTests(unittest.TestCase):
         except OSError as exc:
             self.skipTest(f"symlink unavailable: {exc}")
         draft(self.root, 1, "起点", "新正文。")
-        proc = run_script("rewrite_prose.py", str(self.root), "--chapter", "1")
+        proc = run_script("rewrite_prose.py", str(self.root), "--chapter", "1", "--review-level", "prose")
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(list(outside.iterdir()), [])
 
@@ -741,7 +743,7 @@ class NovelSkillTests(unittest.TestCase):
         draft(self.root, 1, "起点", "旧正文。")
         commit(self.root, 1, delta_for(1, "起点", "旧版本"))
         rewrite_draft(self.root, 1, "起点", "新正文。")
-        run_script("rewrite_prose.py", str(self.root), "--chapter", "1", check=True)
+        run_script("rewrite_prose.py", str(self.root), "--chapter", "1", "--review-level", "prose", check=True)
         run_script("confirm_rewrite.py", str(self.root), "--chapter", "1", "--note", "已核对人物地点物品知识均无变化", check=True)
         shutil.rmtree(self.root / "revisions")
         (self.root / "revisions").mkdir()
@@ -890,23 +892,23 @@ class NovelSkillTests(unittest.TestCase):
     def test_novel_creator_skill_and_agent_task_cards(self) -> None:
         skill_text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: novel-creator-flash", skill_text)
-        self.assertIn("每个写手一次负责连续 5 章", skill_text)
-        self.assertIn("启用 10 个写手", skill_text)
-        self.assertIn("规划 50 章", skill_text)
+        self.assertIn("每个 Writer 一次负责连续 5 章", skill_text)
+        self.assertIn("最多 10 席", skill_text)
+        self.assertIn("Wavefront", skill_text)
         self.assertIn("prepare-production", skill_text)
         self.assertIn("production-status", skill_text)
         self.assertIn('Bash("${CLAUDE_SKILL_DIR}/scripts/novelctl-skill" *)', skill_text)
         self.assertNotIn('Bash("${CLAUDE_SKILL_DIR}/scripts/novelctl" *)', skill_text)
-        self.assertIn("并行执行席位", skill_text)
+        self.assertIn("多个 Writer 并行", skill_text)
         self.assertIn("novel-fast-continuity-reviewer", skill_text)
-        self.assertIn("--continuity-risk low|high", skill_text)
+        self.assertIn("--continuity-review invoke|skip", skill_text)
         self.assertIn("CLAUDE.md", skill_text)
         self.assertNotIn("Humanizer Agent", skill_text)
 
         agents_root = ROOT / ".claude" / "agents"
         expected = {*(f"novel-fast-writer-{i}.md" for i in range(1, 11)),
                     "novel-fast-reader-flow.md", "novel-fast-reader-character.md", "novel-fast-reader-hook.md",
-                    "novel-fast-continuity-reviewer.md"}
+                    "novel-fast-pure-reader.md", "novel-fast-continuity-reviewer.md"}
         self.assertEqual({path.name for path in agents_root.glob("*.md")}, expected)
         for index in range(1, 11):
             writer = (agents_root / f"novel-fast-writer-{index}.md").read_text(encoding="utf-8")
@@ -918,11 +920,15 @@ class NovelSkillTests(unittest.TestCase):
         for name in ("flow", "character", "hook"):
             reader = (agents_root / f"novel-fast-reader-{name}.md").read_text(encoding="utf-8")
             self.assertNotIn("TodoWrite", reader)
-            self.assertIn("Read(.novel/blind-packets/**)", reader)
+            self.assertIn("Read(/.novel/blind-packets/**)", reader)
             self.assertIn("background: true", reader)
             reader_tools = reader.split("tools:", 1)[1].split("disallowedTools:", 1)[0]
-            self.assertIn("Read(.novel/blind-packets/**)", reader_tools)
+            self.assertIn("Read(/.novel/blind-packets/**)", reader_tools)
         self.assertIn("综合盲读主席", (agents_root / "novel-fast-reader-flow.md").read_text(encoding="utf-8"))
+        pure_reader = (agents_root / "novel-fast-pure-reader.md").read_text(encoding="utf-8")
+        self.assertIn("没有编辑", pure_reader)
+        self.assertIn("Read(/.novel/blind-packets/**)", pure_reader)
+        self.assertIn("background: true", pure_reader)
 
     def test_parallel_production_manifest_and_status(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
@@ -932,7 +938,7 @@ class NovelSkillTests(unittest.TestCase):
             "--min-chars", "10", "--target-chars", "12", "--soft-max-chars", "30", check=True,
         )
         self.assertEqual(json.loads(configured.stdout)["production"]["writer_pool_size"], 10)
-        prepared = run_script("prepare_production.py", str(self.root), "--writers", "10", "--chapters", "50", check=True)
+        prepared = run_script("prepare_production.py", str(self.root), "--writers", "10", "--chapters", "50", "--allow-deep-speculation", check=True)
         payload = json.loads(prepared.stdout)
         self.assertEqual(payload["planned_chapters"], 50)
         self.assertEqual(payload["writer_count"], 10)
@@ -955,7 +961,7 @@ class NovelSkillTests(unittest.TestCase):
         self.assertEqual(len(status["blocks"]), 10)
         self.assertFalse(status["continuity_risk_detected"])
 
-    def test_persisted_writer_risk_forces_high_continuity_review(self) -> None:
+    def test_persisted_writer_risk_forces_continuity_reviewer(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
         run_script(
             "configure_project.py", str(self.root),
@@ -978,15 +984,15 @@ class NovelSkillTests(unittest.TestCase):
             "new_promises": [], "motifs_or_objects": [], "strong_lines_or_moments": [],
             "possible_continuity_risks": ["第三章道具归属可能与第一章冲突"],
         })
-        blocked = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low")
+        blocked = run_script("prepare_batch_review.py", str(self.root), "--continuity-review", "skip", "--continuity-reason", "test fixture")
         self.assertNotEqual(blocked.returncode, 0)
-        self.assertIn("must be high", blocked.stderr)
-        high = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "high", check=True)
+        self.assertIn("must be invoke", blocked.stderr)
+        high = run_script("prepare_batch_review.py", str(self.root), "--continuity-review", "invoke", "--continuity-reason", "test invoked review", check=True)
         payload = json.loads(high.stdout)
         self.assertTrue(payload["writer_report_risks"])
         record = json.loads((self.root / payload["output"]).read_text(encoding="utf-8"))
         self.assertEqual(record["continuity"]["writer_report_risk_count"], 1)
-        self.assertTrue(any("道具归属" in item for item in record["continuity"]["risk_reasons"]))
+        self.assertTrue(any("道具归属" in item for item in record["continuity"]["reasons"]))
 
     def test_reader_panel_requires_configured_count(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
@@ -997,7 +1003,7 @@ class NovelSkillTests(unittest.TestCase):
         )
         for number in range(1, 6):
             draft(self.root, number, f"批次{number}", "正文内容。")
-        prepared = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low", check=True)
+        prepared = run_script("prepare_batch_review.py", str(self.root), "--continuity-review", "skip", "--continuity-reason", "test fixture", "--imported", check=True)
         record_path = self.root / json.loads(prepared.stdout)["output"]
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["first_reader"].update({
@@ -1009,6 +1015,8 @@ class NovelSkillTests(unittest.TestCase):
             "issue_tags": [],
             "highest_value_revision": "",
         })
+        record["pure_reader"] = {"status": "completed", "response": "自然阅读反馈"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
         record["continuity"].update({
             "status": "completed", "checked_by": "main-agent",
             "blocking_count": 0, "warning_count": 0,
@@ -1029,15 +1037,14 @@ class NovelSkillTests(unittest.TestCase):
             "--blind-reader-count", "2", "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000",
             check=True,
         )
-        prepared = json.loads(run_script("prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True).stdout)
-        self.assertEqual([job["reader"] for job in prepared["reader_jobs"]], ["novel-fast-reader-flow", "novel-fast-reader-hook"])
+        run_script("prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True)
         for number in range(1, 6):
             draft(self.root, number, f"批次{number}", "正文内容。")
-        review = json.loads(run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low", check=True).stdout)
+        review = json.loads(run_script("prepare_batch_review.py", str(self.root), "--continuity-review", "skip", "--continuity-reason", "test fixture", "--imported", check=True).stdout)
         record = json.loads((self.root / review["output"]).read_text(encoding="utf-8"))
         self.assertEqual(record["first_reader"]["available_readers"], ["novel-fast-reader-flow", "novel-fast-reader-hook"])
 
-    def test_high_risk_batch_requires_fast_continuity_reviewer(self) -> None:
+    def test_invoked_review_requires_fast_continuity_reviewer(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
         run_script(
             "configure_project.py", str(self.root),
@@ -1048,13 +1055,12 @@ class NovelSkillTests(unittest.TestCase):
             draft(self.root, number, f"批次{number}", "正文内容。")
         prepared = json.loads(run_script(
             "prepare_batch_review.py", str(self.root),
-            "--continuity-risk", "high",
-            "--risk-reason", "writer-3 reported item ownership drift",
+            "--continuity-review", "invoke", "--continuity-reason", "writer-3 reported item ownership drift", "--imported",
             check=True,
         ).stdout)
         record_path = self.root / prepared["output"]
         record = json.loads(record_path.read_text(encoding="utf-8"))
-        self.assertEqual(record["continuity"]["risk_level"], "high")
+        self.assertEqual(record["continuity"]["decision"], "invoke")
         record["first_reader"].update({
             "status": "completed",
             "completed_readers": ["novel-fast-reader-flow", "novel-fast-reader-hook"],
@@ -1064,6 +1070,8 @@ class NovelSkillTests(unittest.TestCase):
             "issue_tags": [],
             "highest_value_revision": "",
         })
+        record["pure_reader"] = {"status": "completed", "response": "自然阅读反馈"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
         record["continuity"].update({
             "status": "completed", "checked_by": "main-agent",
             "blocking_count": 0, "warning_count": 0,
@@ -1072,8 +1080,7 @@ class NovelSkillTests(unittest.TestCase):
         blocked = run_script("finalize_batch_review.py", str(self.root))
         self.assertNotEqual(blocked.returncode, 0)
         self.assertIn("novel-fast-continuity-reviewer", blocked.stderr)
-        record["continuity"]["checked_by"] = "novel-fast-continuity-reviewer"
-        write_json(record_path, record)
+        run_script("review_continuity.py", str(self.root), "--complete", "--blocking-count", "0", "--warning-count", "0", check=True)
         finalized = run_script("finalize_batch_review.py", str(self.root))
         self.assertEqual(finalized.returncode, 0, finalized.stderr)
 
@@ -1102,7 +1109,7 @@ class NovelSkillTests(unittest.TestCase):
         self.assertEqual(settings["chapter_length"]["minimum_effective_chars"], 2700)
         self.assertEqual(settings["chapter_length"]["target_effective_chars"], 3200)
         self.assertEqual(settings["batch"], {"batch_size": 5, "planning_window": 10})
-        self.assertEqual(settings["production"], {"writer_pool_size": 5, "blind_reader_count": 1})
+        self.assertEqual(settings["production"], {"writer_pool_size": 5, "blind_reader_count": 1, "speculative_lookahead_blocks": 2})
         self.assertNotIn("maximum_" + "expansion_attempts", settings["chapter_length"])
         (self.root / ".novel/staging/chapter-0001.md").write_text(
             "# 第1章 测试\n\n甲，乙！abc 12。\n", encoding="utf-8"
@@ -1152,11 +1159,18 @@ class NovelSkillTests(unittest.TestCase):
         self.assertTrue((self.root / ".novel/staging/chapter-0001.md").is_file())
         self.assertFalse((self.root / "chapters/chapter-0001.md").exists())
 
-        finalize_batch_review_from_delta(self.root, 1, data)
-        accepted = run_script(
-            "novelctl.py", "commit", str(self.root), "--chapter", "1",
-            "--min-chars", "4", "--target-chars", "4", "--soft-max-chars", "100",
+        blocked_review = run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "test fixture", "--imported",
         )
+        self.assertNotEqual(blocked_review.returncode, 0)
+        self.assertIn("hard minimum", blocked_review.stderr)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--min-chars", "4", "--target-chars", "4", "--soft-max-chars", "100", check=True,
+        )
+        finalize_batch_review_from_delta(self.root, 1, data)
+        accepted = run_script("novelctl.py", "commit", str(self.root), "--chapter", "1")
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
         meta = json.loads((self.root / "state/chapters/chapter-0001.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["length"]["effective_chars"], 4)
@@ -1208,9 +1222,10 @@ class NovelSkillTests(unittest.TestCase):
         skill_target = project / ".claude/skills/novel-creator-flash"
         agents_target = project / ".claude/agents"
         self.assertTrue((skill_target / "SKILL.md").is_file())
+        self.assertEqual((skill_target / ".project-root").read_text(encoding="utf-8").strip(), str(project.resolve()))
         agent_names = [*(f"novel-fast-writer-{i}.md" for i in range(1, 11)),
                        "novel-fast-reader-flow.md", "novel-fast-reader-character.md", "novel-fast-reader-hook.md",
-                       "novel-fast-continuity-reviewer.md"]
+                       "novel-fast-pure-reader.md", "novel-fast-continuity-reviewer.md"]
         for name in agent_names:
             self.assertTrue((agents_target / name).is_file())
         (skill_target / "old-marker.txt").write_text("old skill", encoding="utf-8")
@@ -1381,7 +1396,7 @@ class NovelSkillTests(unittest.TestCase):
         self.assertEqual(meta["scene_entities"], [])
         context = run_script("build_context.py", str(self.root), "--chapter", "2", check=True)
         packet = (self.root / json.loads(context.stdout)["output"]).read_text(encoding="utf-8")
-        self.assertIn("上一章场景交接", packet)
+        self.assertIn("紧邻前文的场景交接", packet)
         self.assertIn("门后脚步正在接近", packet)
 
     def test_context_prioritizes_scene_entities_and_uses_one_full_chapter_plus_tail(self) -> None:
@@ -1462,7 +1477,7 @@ class NovelSkillTests(unittest.TestCase):
         )
         author_payload = json.loads(author_context.stdout)
         author_text = (self.root / author_payload["output"]).read_text(encoding="utf-8")
-        self.assertIn("上下文角色：author", author_text)
+        self.assertNotIn("上下文角色：author", author_text)
         self.assertIn("STYLE-MARKER", author_text)
         reviewer_context = run_script(
             "build_context.py", str(self.root), "--chapter", "1", "--role", "reviewer", "--query", "当前章人物选择", check=True
@@ -1655,14 +1670,14 @@ class NovelSkillTests(unittest.TestCase):
     def test_reader_isolation_voice_examples_and_feedback_lessons_contract(self) -> None:
         reader = (ROOT / ".claude/agents/novel-fast-reader-flow.md").read_text(encoding="utf-8")
         self.assertNotIn("TodoWrite", reader)
-        self.assertIn("Read(.novel/blind-packets/**)", reader)
+        self.assertIn("Read(/.novel/blind-packets/**)", reader)
         self.assertNotIn("  - TaskStop", reader)
         self.assertIn("五章", reader)
         self.assertIn("综合盲读主席", reader)
         self.assertIn("most_alive", reader)
         self.assertIn("flattest_or_generic", reader)
         reader_tools = reader.split("tools:", 1)[1].split("disallowedTools:", 1)[0]
-        self.assertIn("Read(.novel/blind-packets/**)", reader_tools)
+        self.assertIn("Read(/.novel/blind-packets/**)", reader_tools)
         self.assertNotIn("Glob", reader_tools)
         self.assertNotIn("Grep", reader_tools)
         lessons = (ASSETS / "creative-lessons-template.md").read_text(encoding="utf-8")
@@ -1818,7 +1833,7 @@ class NovelSkillTests(unittest.TestCase):
         init_project(self.root, test_batch_size=5)
         for number in range(1, 6):
             draft(self.root, number, f"批次{number}", "正文内容。")
-        prepared = run_script("prepare_batch_review.py", str(self.root), "--continuity-risk", "low", check=True)
+        prepared = run_script("prepare_batch_review.py", str(self.root), "--continuity-review", "skip", "--continuity-reason", "test fixture", "--imported", check=True)
         record_path = self.root / json.loads(prepared.stdout)["output"]
         record = json.loads(record_path.read_text(encoding="utf-8"))
         record["first_reader"] = {
@@ -1829,7 +1844,9 @@ class NovelSkillTests(unittest.TestCase):
             "revision_applied": True, "issue_tags": ["emotion-overexplained"],
             "highest_value_revision": "删除重复情绪解释",
         }
-        record["continuity"] = {"status": "completed", "checked_by": "main-agent", "blocking_count": 0, "warning_count": 1}
+        record["pure_reader"] = {"status": "completed", "response": "自然阅读反馈"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
+        record["continuity"] = {"decision": "skip", "reasons": ["test fixture"], "status": "completed", "checked_by": "main-agent", "blocking_count": 0, "warning_count": 1}
         write_json(record_path, record)
         run_script("finalize_batch_review.py", str(self.root), check=True)
         # Any edit after finalization blocks even the first commit in the batch.
@@ -1879,7 +1896,7 @@ class NovelSkillTests(unittest.TestCase):
         blocked = subprocess.run(
             [sys.executable, str(SCRIPTS / "novelctl_skill.py"), "init", str(outside), "--title", "越界"],
             cwd=self.root, text=True, capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}, timeout=30,
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "CLAUDE_PROJECT_DIR": str(self.root)}, timeout=30,
         )
         self.assertNotEqual(blocked.returncode, 0)
         self.assertFalse(outside.exists())
@@ -1887,7 +1904,7 @@ class NovelSkillTests(unittest.TestCase):
         proc = subprocess.run(
             [sys.executable, str(SCRIPTS / "novelctl_skill.py"), "init", "--title", "绑定项目", "--genre", "通用"],
             cwd=self.root, text=True, capture_output=True, encoding="utf-8",
-            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}, timeout=30,
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "CLAUDE_PROJECT_DIR": str(self.root)}, timeout=30,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue((self.root / "project.md").is_file())
@@ -1902,21 +1919,25 @@ class NovelSkillTests(unittest.TestCase):
         payload = json.loads(prepared.stdout)
         self.assertEqual(payload["writer_count"], 2)
         self.assertEqual([(a["start_chapter"], a["end_chapter"]) for a in payload["assignments"]], [(1, 5), (6, 10)])
-        self.assertEqual(payload["main_agent_tail"]["start_chapter"], 11)
-        self.assertEqual(payload["main_agent_tail"]["end_chapter"], 12)
-        self.assertEqual(payload["main_agent_tail"]["writer"], "main-agent")
+        self.assertEqual(payload["main_agent_remainder"]["start_chapter"], 11)
+        self.assertEqual(payload["main_agent_remainder"]["end_chapter"], 12)
+        self.assertEqual(payload["main_agent_remainder"]["writer"], "main-agent")
 
     def test_under_five_production_uses_no_writer_and_final_tail_blind_packet(self) -> None:
         init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000", check=True,
+        )
         prepared = run_script("prepare_production.py", str(self.root), "--chapters", "3", check=True)
         payload = json.loads(prepared.stdout)
         self.assertEqual(payload["writer_count"], 0)
         self.assertEqual(payload["assignments"], [])
-        self.assertEqual(payload["main_agent_tail"]["chapter_count"], 3)
+        self.assertEqual(payload["main_agent_remainder"]["chapter_count"], 3)
         for number in range(1, 4):
             draft(self.root, number, f"尾声{number}", f"尾声正文{number}。")
         reviewed = run_script(
-            "prepare_batch_review.py", str(self.root), "--continuity-risk", "low", "--final-tail-count", "3", check=True
+            "prepare_batch_review.py", str(self.root), "--continuity-review", "skip", "--continuity-reason", "test fixture", "--final-tail-count", "3", check=True
         )
         record = json.loads((self.root / json.loads(reviewed.stdout)["output"]).read_text(encoding="utf-8"))
         self.assertEqual(record["review_kind"], "final_tail")
@@ -1925,7 +1946,409 @@ class NovelSkillTests(unittest.TestCase):
         self.assertIn("第3章", packet.read_text(encoding="utf-8"))
 
 
+    def test_prepare_review_blocks_under_minimum_before_any_reader(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=1)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--min-chars", "4000", "--target-chars", "4500", "--soft-max-chars", "5000", check=True,
+        )
+        draft(self.root, 1, "短稿", "甲" * 2000)
+        blocked = run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "simple final tail", "--imported",
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("hard minimum", blocked.stderr)
+        self.assertFalse((self.root / "state/reviews/final-tail-0001-0001.json").exists())
+
+    def test_pure_reader_is_required_before_finalize(self) -> None:
+        init_project(self.root, test_batch_size=1)
+        draft(self.root, 1, "盲读", "正文自然推进。")
+        prepared = json.loads(run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "simple unit", "--imported", check=True,
+        ).stdout)
+        record_path = self.root / prepared["output"]
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        reader = record["first_reader"]
+        reader.update({
+            "status": "completed", "completed_readers": [reader["available_readers"][0]],
+            "verdict": "acceptable", "ending_pull": "fair", "revision_applied": True,
+            "issue_tags": [], "highest_value_revision": "",
+        })
+        write_json(record_path, record)
+        blocked = run_script("finalize_batch_review.py", str(self.root))
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("pure blind reader", blocked.stderr)
+        record["pure_reader"] = {"status": "completed", "response": "读起来顺，我会自然继续读。"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
+        write_json(record_path, record)
+        finalized = run_script("finalize_batch_review.py", str(self.root))
+        self.assertEqual(finalized.returncode, 0, finalized.stderr)
+
+    def test_final_clean_blocks_production_metadata_leak(self) -> None:
+        init_project(self.root, test_batch_size=1)
+        draft(self.root, 1, "边界", "我把前十四章的收获过了一遍，才继续往前走。")
+        prepared = json.loads(run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "simple unit", "--imported", check=True,
+        ).stdout)
+        record_path = self.root / prepared["output"]
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        reader = record["first_reader"]
+        reader.update({
+            "status": "completed", "completed_readers": [reader["available_readers"][0]],
+            "verdict": "acceptable", "ending_pull": "fair", "revision_applied": True,
+            "issue_tags": [], "highest_value_revision": "",
+        })
+        record["pure_reader"] = {"status": "completed", "response": "整体能读，但有一句让我出戏。"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
+        write_json(record_path, record)
+        finalized = run_script("finalize_batch_review.py", str(self.root))
+        self.assertNotEqual(finalized.returncode, 0)
+        self.assertIn("semantic final-clean warnings", finalized.stderr)
+        finalized_record = json.loads(record_path.read_text(encoding="utf-8"))
+        warnings = finalized_record["final_clean"].get("warnings", [])
+        self.assertTrue(any(item.get("category") == "chapter_reference" for item in warnings))
+        self.assertEqual(finalized_record["final_clean"]["status"], "needs_adjudication")
+
+    def test_final_clean_blocks_obvious_internal_residue(self) -> None:
+        init_project(self.root, test_batch_size=1)
+        draft(self.root, 1, "残渣", "我继续往前走。\n\n{{PLACEHOLDER}}\n")
+        prepared = json.loads(run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "simple unit", "--imported", check=True,
+        ).stdout)
+        record_path = self.root / prepared["output"]
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        reader = record["first_reader"]
+        reader.update({
+            "status": "completed", "completed_readers": [reader["available_readers"][0]],
+            "verdict": "acceptable", "ending_pull": "fair", "revision_applied": True,
+            "issue_tags": [], "highest_value_revision": "",
+        })
+        record["pure_reader"] = {"status": "completed", "response": "自然阅读反馈。"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
+        write_json(record_path, record)
+        blocked = run_script("finalize_batch_review.py", str(self.root))
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("placeholder", blocked.stderr)
+
+    def test_final_clean_allows_in_world_chapter_reference(self) -> None:
+        init_project(self.root, test_batch_size=1)
+        draft(self.root, 1, "书页", "我在《药经》第九章领悟了另一层意思，才看懂那句旧注。")
+        prepared = json.loads(run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "simple unit", "--imported", check=True,
+        ).stdout)
+        record_path = self.root / prepared["output"]
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        reader = record["first_reader"]
+        reader.update({
+            "status": "completed", "completed_readers": [reader["available_readers"][0]],
+            "verdict": "acceptable", "ending_pull": "fair", "revision_applied": True,
+            "issue_tags": [], "highest_value_revision": "",
+        })
+        record["pure_reader"] = {"status": "completed", "response": "这处章号明显属于故事里的书，不出戏。"}
+        record["feedback_adjudication"] = {"status": "completed", "decisions": []}
+        write_json(record_path, record)
+        first = run_script("finalize_batch_review.py", str(self.root))
+        self.assertNotEqual(first.returncode, 0)
+        pending = json.loads(record_path.read_text(encoding="utf-8"))
+        warning = next(item for item in pending["final_clean"]["warnings"] if item.get("category") == "chapter_reference")
+        run_script("adjudicate_clean_warning.py", str(self.root), "--id", warning["id"], "--decision", "intentional_in_world", "--reason", "人物正在阅读世界内真实存在的《药经》第九章", check=True)
+        finalized = run_script("finalize_batch_review.py", str(self.root))
+        self.assertEqual(finalized.returncode, 0, finalized.stderr)
+        payload = json.loads(finalized.stdout)
+        self.assertGreaterEqual(payload["final_clean_warnings"], 1)
+
+
+
+    def test_author_context_hides_production_metadata(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        current_path = self.root / "state/current.json"
+        current = json.loads(current_path.read_text(encoding="utf-8"))
+        current["latest_chapter"] = 9
+        current["reader_review"] = {"reviewed_through_chapter": 5, "batch_id": 1}
+        current["scene_entities"] = ["CHAR-0001"]
+        current["scene_bridge"]["last_action"] = "抬头看向城门"
+        write_json(current_path, current)
+        write_json(self.root / "state/entities/characters/CHAR-0001.json", {
+            "schema": 1, "id": "CHAR-0001", "name": "甲", "status": "active",
+            "current_location": "城门", "current_goal": "等人", "created_chapter": 2,
+            "last_seen_chapter": 8, "voice": {"sentence_shape": "短"},
+        })
+        proc = run_script("build_context.py", str(self.root), "--chapter", "10", "--role", "writer", check=True)
+        output = self.root / json.loads(proc.stdout)["output"]
+        text = output.read_text(encoding="utf-8")
+        for forbidden in (
+            "latest_chapter", "reader_review", "reviewed_through_chapter", "batch_id",
+            "created_chapter", "last_seen_chapter", "十章滚动规划", "<!-- SOURCE:",
+            "目标章节：10", "字符预算：", "本批次承接与变化", "五章共同压力",
+        ):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("紧邻前文的场景交接", text)
+        self.assertIn("相关实体：甲", text)
+
+    def test_prepare_review_requires_production_or_explicit_import(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000", check=True,
+        )
+        for number in range(1, 6):
+            draft(self.root, number, f"导入{number}", "正文内容。")
+        blocked = run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "manual prose",
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("no active production run", blocked.stderr)
+        imported = run_script(
+            "prepare_batch_review.py", str(self.root),
+            "--continuity-review", "skip", "--continuity-reason", "manual prose", "--source-mode", "imported", check=True,
+        )
+        record = json.loads((self.root / json.loads(imported.stdout)["output"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["source_mode"], "imported")
+        self.assertIsNone(record["production_evidence"])
+
+    def test_production_manifest_rejects_short_output_list(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        payload = json.loads(run_script(
+            "prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True,
+        ).stdout)
+        current = json.loads((self.root / "state/current.json").read_text(encoding="utf-8"))
+        manifest_path = self.root / current["production_run"]["manifest"]
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["assignments"][0]["outputs"].pop()
+        write_json(manifest_path, manifest)
+        blocked = run_script("production_status.py", str(self.root))
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn("outputs", blocked.stderr)
+
+    def test_ready_production_block_does_not_wait_for_whole_wave(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script(
+            "configure_project.py", str(self.root),
+            "--min-chars", "1", "--target-chars", "1", "--soft-max-chars", "1000", check=True,
+        )
+        payload = json.loads(run_script(
+            "prepare_production.py", str(self.root), "--writers", "2", "--chapters", "10", check=True,
+        ).stdout)
+        first = payload["assignments"][0]
+        for number, rel in zip(range(1, 6), first["outputs"]):
+            target = self.root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"# 第{number}章 原料\n\n正文内容。\n", encoding="utf-8")
+        write_json(self.root / first["report"], {
+            "schema": 1, "writer": first["writer"], "start_chapter": 1, "end_chapter": 5,
+            "newly_invented_details": [], "character_micro_changes": [], "new_promises": [],
+            "motifs_or_objects": [], "strong_lines_or_moments": [], "possible_continuity_risks": [],
+        })
+        status = json.loads(run_script("production_status.py", str(self.root), check=True).stdout)
+        self.assertFalse(status["all_ready"])
+        self.assertEqual(status["ready_blocks"], ["1-5"])
+        self.assertEqual(status["first_unready_block"], "6-10")
+
+
+    def test_partial_staging_carries_forward_without_writer_overlap(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        # Simulate two already-written main-agent chapters at the start of the current formal unit.
+        draft(self.root, 1, "部分1", "正文。")
+        draft(self.root, 2, "部分2", "正文。")
+        prepared = json.loads(run_script(
+            "prepare_production.py", str(self.root), "--writers", "2", "--chapters", "8", check=True,
+        ).stdout)
+        self.assertEqual(prepared["requested_range"], "3-10")
+        self.assertEqual(prepared["main_agent_prefix"]["start_chapter"], 3)
+        self.assertEqual(prepared["main_agent_prefix"]["end_chapter"], 5)
+        self.assertEqual(prepared["writer_count"], 1)
+        self.assertEqual(prepared["assignments"][0]["start_chapter"], 6)
+        self.assertEqual(prepared["assignments"][0]["end_chapter"], 10)
+        self.assertIsNone(prepared["main_agent_remainder"])
+        self.assertFalse(any(rel.endswith("chapter-0003.md") for rel in prepared["assignments"][0]["outputs"]))
+
+
+    def test_restful_reader_ending_is_valid(self) -> None:
+        errors = common.validate_reader_review({
+            "reviewed_through_chapter": 5,
+            "reason": "manual",
+            "verdict": "acceptable",
+            "ending_pull": "restful",
+            "revision_applied": False,
+            "issue_tags": [],
+            "highest_value_revision": "",
+        })
+        self.assertEqual(errors, [])
+
+
+    def test_writer_tools_are_clean_context_scoped(self) -> None:
+        for i in range(1, 11):
+            text = (ROOT / f".claude/agents/novel-fast-writer-{i}.md").read_text(encoding="utf-8")
+            self.assertIn("Read(/state/context/**)", text)
+            self.assertIn("Edit(/.novel/production/**)", text)
+            for forbidden in ("Read(/state/**)", "Read(/plot/**)", "Read(/canon/**)", "Read(/project.md)"):
+                self.assertNotIn(forbidden, text)
+
+
+    def test_v8_wavefront_caps_default_speculation(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        proc = run_script("prepare_production.py", str(self.root), "--writers", "5", "--chapters", "25", check=True)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["writer_count"], 2)
+        self.assertEqual(data["scheduled_now_chapters"], 10)
+        self.assertEqual(data["deferred_chapters"], 15)
+        # Fresh workspace: explicit deep speculation can still use the configured pool.
+        other = Path(self.temp.name) / "turbo"
+        init_project(other, relaxed_length=True, test_batch_size=5)
+        turbo = run_script("prepare_production.py", str(other), "--writers", "5", "--chapters", "25", "--allow-deep-speculation", check=True)
+        td = json.loads(turbo.stdout)
+        self.assertEqual(td["writer_count"], 5)
+        self.assertEqual(td["deferred_chapters"], 0)
+
+    def test_v8_schema2_block_interface_rebase_and_adoption(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        current_path = self.root / "state/current.json"
+        current = json.loads(current_path.read_text(encoding="utf-8"))
+        current["current_location"] = "城门"
+        write_json(current_path, current)
+        prepared = json.loads(run_script("prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True).stdout)
+        manifest = json.loads((self.root / prepared["manifest"]).read_text(encoding="utf-8"))
+        assignment = manifest["assignments"][0]
+        for chapter, rel in zip(range(1, 6), assignment["outputs"]):
+            path = self.root / rel; path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# 第{chapter}章 原料\n\n正文。\n", encoding="utf-8")
+        report = {
+            "schema": 2, "writer": assignment["writer"], "start_chapter": 1, "end_chapter": 5,
+            "chapter_deltas": [
+                {"chapter": n, "summary": f"第{n}个实际变化", "current_patch": {"current_location": "新城" if n == 5 else "城门", "point_of_view": "", "scene_entities": [], "current_goal": "继续", "scene_bridge": {"time":"","location":"","pov":"","last_action":"","immediate_pressure":"","emotional_residue":""}}, "reader_model_updates": [], "plan_deviations": [], "continuity_risks": []}
+                for n in range(1, 6)
+            ],
+            "block_interface": {
+                "assumed_entry": {"current_location": "旧城"}, "exit_state": {"current_location": "新城"},
+                "must_carry_forward": ["钥匙仍在主角手里"], "plan_deviations": [], "reader_now_believes": [], "reader_now_wonders": [],
+                "soft_inventions": [], "hard_inventions": [], "creative_keep": ["桥上的停顿"], "possible_continuity_risks": []
+            }
+        }
+        write_json(self.root / assignment["report"], report)
+        status = json.loads(run_script("production_status.py", str(self.root), check=True).stdout)
+        self.assertEqual(status["blocks"][0]["report_schema"], 2)
+        self.assertTrue(status["blocks"][0]["ready"])
+        rebase = json.loads(run_script("rebase_production.py", str(self.root), "--start", "1", check=True).stdout)
+        self.assertTrue(rebase["rebase_required"])
+        for chapter, rel in zip(range(1, 6), assignment["outputs"]):
+            text = (self.root / rel).read_text(encoding="utf-8")
+            (self.root / f".novel/staging/chapter-{chapter:04d}.md").write_text(text, encoding="utf-8")
+        adopted = json.loads(run_script("adopt_production_interface.py", str(self.root), "--start", "1", check=True).stdout)
+        self.assertEqual(adopted["adopted"], [1,2,3,4,5])
+        working = json.loads((self.root / ".novel/staging/working-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(working["story_state"]["current_location"], "新城")
+        self.assertEqual(working["latest_staged_chapter"], 5)
+
+    def test_v8_integration_metrics_recommends_lower_lookahead_for_heavy_rewrite(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        prepared = json.loads(run_script("prepare_production.py", str(self.root), "--writers", "1", "--chapters", "5", check=True).stdout)
+        manifest = json.loads((self.root / prepared["manifest"]).read_text(encoding="utf-8"))
+        assignment = manifest["assignments"][0]
+        for chapter, rel in zip(range(1, 6), assignment["outputs"]):
+            raw = self.root / rel; raw.parent.mkdir(parents=True, exist_ok=True); raw.write_text(f"# 第{chapter}章 原料\n\n" + "甲" * 300 + "\n", encoding="utf-8")
+            can = self.root / f"chapters/chapter-{chapter:04d}.md"; can.parent.mkdir(parents=True, exist_ok=True); can.write_text(f"# 第{chapter}章 正史\n\n" + "乙" * 300 + "\n", encoding="utf-8")
+        out = json.loads(run_script("integration_metrics.py", str(self.root), "--start", "1", check=True).stdout)
+        self.assertLess(out["canonical_survival_rate"], 0.66)
+        self.assertEqual(out["recommended_lookahead_blocks"], 1)
+        self.assertTrue(out["advisory_only"])
+
+
+    def test_v9_main_agent_source_mode_auto_detects_provisionals(self) -> None:
+        init_project(self.root, relaxed_length=False, test_batch_size=5)
+        run_script("configure_project.py",str(self.root),"--min-chars","1","--target-chars","1","--soft-max-chars","1000",check=True)
+        for n in range(1,6):
+            draft(self.root,n,f"主写{n}","正文。")
+            run_script("working_state.py",str(self.root),"--scaffold","--chapter",str(n),check=True)
+        prepared=json.loads(run_script("prepare_batch_review.py",str(self.root),"--continuity-review","skip","--continuity-reason","main agent unit",check=True).stdout)
+        record=json.loads((self.root/prepared["output"]).read_text(encoding="utf-8"))
+        self.assertEqual(record["source_mode"],"main-agent"); self.assertIsNone(record["production_evidence"])
+
+    def test_v9_legacy_schema2_manifest_without_context_is_accepted(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        prepared=json.loads(run_script("prepare_production.py",str(self.root),"--writers","1","--chapters","5",check=True).stdout)
+        path=self.root/prepared["manifest"]; manifest=json.loads(path.read_text(encoding="utf-8")); manifest["assignments"][0].pop("context",None); write_json(path,manifest)
+        proc=run_script("production_status.py",str(self.root))
+        self.assertEqual(proc.returncode,0,proc.stderr)
+
+    def test_v9_interface_adjudication_closes_future_affecting_items(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        prepared=json.loads(run_script("prepare_production.py",str(self.root),"--writers","1","--chapters","5",check=True).stdout)
+        manifest=json.loads((self.root/prepared["manifest"]).read_text(encoding="utf-8")); a=manifest["assignments"][0]
+        for n,rel in zip(range(1,6),a["outputs"]):
+            target=self.root/rel; target.parent.mkdir(parents=True,exist_ok=True); target.write_text(f"# 第{n}章 原料\n\n正文。\n",encoding="utf-8")
+        report={"schema":2,"writer":a["writer"],"start_chapter":1,"end_chapter":5,"chapter_deltas":[{"chapter":n,"summary":"","current_patch":{},"reader_model_updates":[]} for n in range(1,6)],"block_interface":{"assumed_entry":{},"exit_state":{},"must_carry_forward":["钥匙必须继续存在"],"plan_deviations":[],"reader_now_believes":[],"reader_now_wonders":[],"soft_inventions":[],"hard_inventions":[],"creative_keep":[],"possible_continuity_risks":[],"adjudications":[]}}
+        write_json(self.root/a["report"],report)
+        rb=json.loads(run_script("rebase_production.py",str(self.root),"--start","1",check=True).stdout); self.assertTrue(rb["interface_adjudication_required"])
+        run_script("adjudicate_production_interface.py",str(self.root),"--start","1","--key","must_carry_forward","--index","0","--decision","accepted","--reason","整合稿保留钥匙",check=True)
+        rb2=json.loads(run_script("rebase_production.py",str(self.root),"--start","1",check=True).stdout); self.assertFalse(rb2["interface_adjudication_required"])
+
+    def test_v9_effective_staging_context_continues_from_wip(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        draft(self.root,1,"一","第一章实际结尾。")
+        run_script("working_state.py",str(self.root),"--scaffold","--chapter","1",check=True)
+        draft(self.root,2,"二","第二章实际结尾只有这里才有。")
+        run_script("working_state.py",str(self.root),"--scaffold","--chapter","2",check=True)
+        proc=run_script("build_context.py",str(self.root),"--role","writer",check=True); payload=json.loads(proc.stdout); self.assertEqual(payload["chapter"],3)
+        self.assertIn("第二章实际结尾只有这里才有",(self.root/payload["output"]).read_text(encoding="utf-8"))
+
+
+    def test_v10_group_warning_adjudication_is_hash_scoped(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=1)
+        draft(self.root,1,"世界内术语","公司的 Writer Agent 把 Prompt 交给另一个 Agent，Reader 又退了回来。")
+        prepared=json.loads(run_script("prepare_batch_review.py",str(self.root),"--continuity-review","skip","--continuity-reason","simple","--imported",check=True).stdout)
+        record_path=self.root/prepared["output"]; record=json.loads(record_path.read_text(encoding="utf-8"))
+        reader=record["first_reader"]; reader.update({"status":"completed","completed_readers":[reader["available_readers"][0]],"verdict":"acceptable","ending_pull":"restful","revision_applied":False,"issue_tags":[],"highest_value_revision":""})
+        record["pure_reader"]={"status":"completed","response":"这些词明显属于故事世界里的公司产品。"}
+        record["feedback_adjudication"]={"status":"completed","decisions":[]}; write_json(record_path,record)
+        blocked=run_script("finalize_batch_review.py",str(self.root)); self.assertNotEqual(blocked.returncode,0)
+        pending=json.loads(record_path.read_text(encoding="utf-8")); prod=[x for x in pending["final_clean"]["warnings"] if x.get("category")=="production_term"]
+        self.assertGreaterEqual(len(prod),1)
+        grouped=json.loads(run_script("adjudicate_clean_warning.py",str(self.root),"--category","production_term","--decision","intentional_in_world","--reason","故事世界中的 AI 出版公司明确使用这些产品术语",check=True).stdout)
+        self.assertEqual(grouped["covered"],len({x["id"] for x in prod}))
+        done=run_script("finalize_batch_review.py",str(self.root),check=True); self.assertEqual(done.returncode,0)
+        record=json.loads(record_path.read_text(encoding="utf-8")); record["finalized"]=False; record["finalized_at"]=None; write_json(record_path,record)
+        draft(self.root,1,"世界内术语","公司的 Writer Agent 把 Prompt 交给另一个 Agent，Reader 又退了回来。后来 Editor Agent 也加入。")
+        changed=run_script("finalize_batch_review.py",str(self.root)); self.assertNotEqual(changed.returncode,0)
+
+    def test_v10_continuity_reviewer_tools_are_managed_path_scoped(self) -> None:
+        name='novel-fast-continuity-reviewer.md'
+        text=(ROOT/".claude/agents"/name).read_text(encoding="utf-8")
+        self.assertNotIn("  - Read\n",text); self.assertNotIn("  - Glob\n",text); self.assertNotIn("  - Grep\n",text)
+        self.assertIn("Read(/chapters/**)",text); self.assertIn("Read(/state/**)",text); self.assertNotIn("Read(/.claude/**)",text)
+
+    def test_v10_prepare_production_does_not_emit_main_agent_tail_alias(self) -> None:
+        init_project(self.root, relaxed_length=True, test_batch_size=5)
+        payload=json.loads(run_script("prepare_production.py",str(self.root),"--writers","2","--chapters","12",check=True).stdout)
+        self.assertIn("main_agent_remainder",payload); self.assertNotIn("main_agent_tail",payload)
+
+    def test_v10_operations_do_not_teach_legacy_writer_report(self) -> None:
+        text=(ROOT/".claude/skills/novel-creator-flash/references/operations.md").read_text(encoding="utf-8")
+        self.assertNotIn("`newly_invented_details`",text); self.assertIn("schema 2 / Block Interface",text)
+
 FAST_TESTS = {
+    "test_v10_group_warning_adjudication_is_hash_scoped",
+    "test_v10_continuity_reviewer_tools_are_managed_path_scoped",
+    "test_v10_prepare_production_does_not_emit_main_agent_tail_alias",
+    "test_v10_operations_do_not_teach_legacy_writer_report",
+    "test_v9_main_agent_source_mode_auto_detects_provisionals",
+    "test_v9_legacy_schema2_manifest_without_context_is_accepted",
+    "test_v9_interface_adjudication_closes_future_affecting_items",
+    "test_v9_effective_staging_context_continues_from_wip",
+    "test_v8_wavefront_caps_default_speculation",
+    "test_v8_schema2_block_interface_rebase_and_adoption",
+    "test_v8_integration_metrics_recommends_lower_lookahead_for_heavy_rewrite",
+    "test_writer_tools_are_clean_context_scoped",
+    "test_restful_reader_ending_is_valid",
+    "test_prepare_review_blocks_under_minimum_before_any_reader",
+    "test_pure_reader_is_required_before_finalize",
+    "test_final_clean_blocks_production_metadata_leak",
+    "test_final_clean_allows_in_world_chapter_reference",
     "test_skill_bound_wrapper_binds_current_project_and_rejects_workspace_override",
     "test_fixed_review_batch_and_main_agent_tail_production",
     "test_under_five_production_uses_no_writer_and_final_tail_blind_packet",
@@ -1936,10 +2359,10 @@ FAST_TESTS = {
     "test_invalid_length_settings_are_reported_without_traceback",
     "test_novel_creator_skill_and_agent_task_cards",
     "test_parallel_production_manifest_and_status",
-    "test_persisted_writer_risk_forces_high_continuity_review",
+    "test_persisted_writer_risk_forces_continuity_reviewer",
     "test_reader_panel_requires_configured_count",
     "test_two_reader_panel_defaults_to_flow_and_hook",
-    "test_high_risk_batch_requires_fast_continuity_reviewer",
+    "test_invoked_review_requires_fast_continuity_reviewer",
     "test_prepare_delta_scaffolds_title_progress_questions_and_scene_bridge",
     "test_prepare_delta_scaffolds_batch_reader_review_only_at_batch_end",
     "test_reader_isolation_voice_examples_and_feedback_lessons_contract",
@@ -1947,6 +2370,12 @@ FAST_TESTS = {
     "test_short_chapter_is_blocked_and_override_is_recorded",
     "test_single_wrapper_dispatches_trusted_commands",
     "test_alternative_staging_cannot_replace_canonical_and_export_reports_latest",
+    "test_author_context_hides_production_metadata",
+    "test_prepare_review_requires_production_or_explicit_import",
+    "test_production_manifest_rejects_short_output_list",
+    "test_ready_production_block_does_not_wait_for_whole_wave",
+    "test_partial_staging_carries_forward_without_writer_overlap",
+    "test_final_clean_blocks_obvious_internal_residue",
 }
 BENCHMARK_TESTS = {"test_scale_search_1000_chapters"}
 

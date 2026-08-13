@@ -25,7 +25,7 @@ if (( ${#python_cmd[@]} == 0 )) && command -v py >/dev/null 2>&1 && py -3 -c 'im
 (( ${#python_cmd[@]} > 0 )) || { echo "Python 3.10+ is required (python3, python, or py -3)." >&2; exit 1; }
 
 package_root="$(cd "$(dirname "$0")" && pwd)"; source_skill="$package_root/.claude/skills/novel-creator-flash"; source_agents="$package_root/.claude/agents"
-agent_names=(novel-fast-writer-1.md novel-fast-writer-2.md novel-fast-writer-3.md novel-fast-writer-4.md novel-fast-writer-5.md novel-fast-writer-6.md novel-fast-writer-7.md novel-fast-writer-8.md novel-fast-writer-9.md novel-fast-writer-10.md novel-fast-reader-flow.md novel-fast-reader-character.md novel-fast-reader-hook.md novel-fast-continuity-reviewer.md); legacy_skill_names=(novel-creator-fast-production); legacy_agent_names=(novel-style-editor.md)
+agent_names=(novel-fast-writer-1.md novel-fast-writer-2.md novel-fast-writer-3.md novel-fast-writer-4.md novel-fast-writer-5.md novel-fast-writer-6.md novel-fast-writer-7.md novel-fast-writer-8.md novel-fast-writer-9.md novel-fast-writer-10.md novel-fast-reader-flow.md novel-fast-reader-character.md novel-fast-reader-hook.md novel-fast-pure-reader.md novel-fast-continuity-reviewer.md); legacy_skill_names=(novel-creator-fast-production); legacy_agent_names=(novel-style-editor.md)
 [[ -d "$source_skill" ]] || { echo "Skill source not found: $source_skill" >&2; exit 1; }
 for n in "${agent_names[@]}"; do [[ -f "$source_agents/$n" ]] || { echo "Agent source not found: $n" >&2; exit 1; }; done
 if find "$source_skill" "$source_agents" -type l -print -quit | grep -q .; then echo "Package source contains a symbolic link; refusing installation." >&2; exit 1; fi
@@ -47,8 +47,25 @@ if (( ${#legacy_found[@]} > 0 )) && [[ "$migrate" != "true" ]]; then
 ' "${legacy_found[@]}" >&2
 fi
 
-cleanup() { rm -rf "$staging_skill" "$staging_agents" 2>/dev/null || true; }
-trap cleanup EXIT
+installed_skill="false"; installed_agents=(); migrated_skills=(); migrated_agents=()
+cleanup_staging() { rm -rf "$staging_skill" "$staging_agents" 2>/dev/null || true; }
+rollback_install() {
+  rc=$?
+  if (( rc != 0 )); then
+    if [[ "$installed_skill" == "true" && -e "$target_skill" ]]; then rm -rf "$target_skill"; fi
+    for n in "${installed_agents[@]:-}"; do [[ -n "$n" && -e "$agents_root/$n" ]] && rm -f "$agents_root/$n"; done
+    if [[ -e "$backup_root/skill" ]]; then mv "$backup_root/skill" "$target_skill" || true; fi
+    if [[ -d "$backup_root/agents" ]]; then
+      for backup in "$backup_root/agents"/*; do [[ -e "$backup" ]] || continue; mv "$backup" "$agents_root/$(basename "$backup")" || true; done
+    fi
+    for n in "${migrated_skills[@]:-}"; do [[ -e "$backup_root/legacy-skills/$n" ]] && mv "$backup_root/legacy-skills/$n" "$skills_root/$n" || true; done
+    for n in "${migrated_agents[@]:-}"; do [[ -e "$backup_root/legacy-agents/$n" ]] && mv "$backup_root/legacy-agents/$n" "$agents_root/$n" || true; done
+    echo "Installation failed; previous Novel Creator components were restored where backups existed." >&2
+  fi
+  cleanup_staging
+  return "$rc"
+}
+trap rollback_install EXIT
 cp -RP "$source_skill" "$staging_skill"; mkdir -p "$staging_agents"; for n in "${agent_names[@]}"; do cp -P "$source_agents/$n" "$staging_agents/$n"; done
 find "$staging_skill" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true; find "$staging_skill" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 "${python_cmd[@]}" -m compileall -q "$staging_skill/scripts"
@@ -61,13 +78,16 @@ if (( ${#conflicts[@]} > 0 )) && [[ "$force" != "true" ]]; then printf 'Target e
 mkdir -p "$backup_root/agents" "$backup_root/legacy-skills" "$backup_root/legacy-agents"
 if [[ -e "$target_skill" ]]; then mv "$target_skill" "$backup_root/skill"; fi
 for n in "${agent_names[@]}"; do [[ -e "$agents_root/$n" ]] && mv "$agents_root/$n" "$backup_root/agents/$n"; done
-mv "$staging_skill" "$target_skill"; for n in "${agent_names[@]}"; do mv "$staging_agents/$n" "$agents_root/$n"; done; rmdir "$staging_agents"
+mv "$staging_skill" "$target_skill"; installed_skill="true"
+if [[ "$scope" == "project" ]]; then printf '%s\n' "$(cd "$project_path" && pwd -P)" > "$target_skill/.project-root"; fi
+for n in "${agent_names[@]}"; do mv "$staging_agents/$n" "$agents_root/$n"; installed_agents+=("$n"); done; rmdir "$staging_agents"
 
 if [[ "$migrate" == "true" ]]; then
-  for n in "${legacy_skill_names[@]}"; do [[ -e "$skills_root/$n" ]] && mv "$skills_root/$n" "$backup_root/legacy-skills/$n"; done
-  for n in "${legacy_agent_names[@]}"; do [[ -e "$agents_root/$n" ]] && mv "$agents_root/$n" "$backup_root/legacy-agents/$n"; done
+  for n in "${legacy_skill_names[@]}"; do if [[ -e "$skills_root/$n" ]]; then mv "$skills_root/$n" "$backup_root/legacy-skills/$n"; migrated_skills+=("$n"); fi; done
+  for n in "${legacy_agent_names[@]}"; do if [[ -e "$agents_root/$n" ]]; then mv "$agents_root/$n" "$backup_root/legacy-agents/$n"; migrated_agents+=("$n"); fi; done
 fi
 trap - EXIT
+cleanup_staging
 printf 'Installed novel-creator-flash Skill to %s
 ' "$target_skill"; printf 'Installed %s subagents to %s
 ' "${#agent_names[@]}" "$agents_root"

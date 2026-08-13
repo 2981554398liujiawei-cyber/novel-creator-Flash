@@ -2,7 +2,7 @@
 name: novel-fast-reader-character
 description: Novel Creator Flash 的人物盲读者。只可读取受限 blind packet，反馈人物欲望、声音辨识、惯常误读、沉默方式、关系与情绪体验。
 tools:
-  - 'Read(.novel/blind-packets/**)'
+  - 'Read(/.novel/blind-packets/**)'
 disallowedTools:
   - Write
   - Edit
@@ -31,7 +31,6 @@ color: pink
 status: completed | blocked
 reader: character
 verdict: strong | acceptable | weak
-ending_pull: strong | fair | weak
 issue_tags: []
 findings:
   - chapter: N
