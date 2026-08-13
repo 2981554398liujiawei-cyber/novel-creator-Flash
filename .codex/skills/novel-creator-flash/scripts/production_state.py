@@ -156,4 +156,3 @@ def validate_manifest(manifest: Any) -> list[str]:
                 errors.append("main_agent_remainder range/count mismatch")
     elif remainder not in (None,{}): errors.append("main_agent_remainder must be empty when no remainder exists")
     return errors
-
